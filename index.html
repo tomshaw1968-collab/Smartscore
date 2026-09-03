@@ -641,7 +641,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31x";
+var APP_VERSION = "1.4.31aa";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -656,7 +656,7 @@ var APP_VERSION = "1.4.31x";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31x", date:"2026-09-01", notes:[
+  { version:"1.4.31aa", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -1807,6 +1807,86 @@ var EMAILJS_PUBLIC_KEY="MWGlSaxUC-z_GAKO3";
 try{ if(window.emailjs) emailjs.init({publicKey:EMAILJS_PUBLIC_KEY}); }catch(e){}
 function loadBackupEmail(){ try{ return localStorage.getItem("snooker_backup_email")||""; }catch(e){ return ""; } }
 function saveBackupEmail(addr){ try{ localStorage.setItem("snooker_backup_email", addr); }catch(e){} }
+/* v1.4.31y: device authorization system — a small backend (Google Apps
+   Script + Sheet, see SnookerBackend.gs delivered separately) gates
+   backup/restore behind manual approval, per direct requirement: this
+   app may be copied to devices outside the owner's direct control
+   (friends, other tables), so a one-time registration + a human
+   approval step, checked by the owner via a private admin page, replaces
+   any code-based "access key" — the app's own source is fully public
+   (served from GitHub Pages), so nothing living in it could be a real
+   secret. See the file's own header comment for full setup.
+   TODO: paste your deployed Apps Script /exec URL here once set up —
+   nothing in this system works until this is filled in. */
+var BACKEND_URL = "https://script.google.com/macros/s/AKfycbyr6MRcxq3HPH0Wvnh0LOpSB0UY4keuQva4lWQ3WN1qYihvDccZXTYJSvyvgzliV84rkw/exec";
+
+function getOrCreateDeviceId(){
+  var id;
+  try{ id = localStorage.getItem("snooker_device_id"); }catch(e){ id = null; }
+  if(!id){
+    id = "dev_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
+    try{ localStorage.setItem("snooker_device_id", id); }catch(e){}
+  }
+  return id;
+}
+var deviceId = getOrCreateDeviceId();
+
+function getDeviceAuthState(){
+  try{
+    var raw = localStorage.getItem("snooker_device_auth");
+    if(raw) return JSON.parse(raw);
+  }catch(e){}
+  return {registered:false, status:"unknown", name:"", contact:"", label:"", matchCount:0};
+}
+function saveDeviceAuthState(s){
+  try{ localStorage.setItem("snooker_device_auth", JSON.stringify(s)); }catch(e){}
+}
+/* Plain-text POST body deliberately, not application/json — Apps Script
+   Web Apps don't handle a CORS preflight request, which setting a JSON
+   content-type would trigger. The backend parses the raw text itself
+   regardless of what content-type header (if any) arrives. */
+function backendPost(payload, onDone){
+  if(!BACKEND_URL || BACKEND_URL.indexOf("PASTE_YOUR")===0){ onDone({ok:false, error:"Backend URL not configured yet."}); return; }
+  fetch(BACKEND_URL, { method:"POST", body:JSON.stringify(payload) })
+    .then(function(r){ return r.json(); })
+    .then(function(data){ onDone(data); })
+    .catch(function(err){ onDone({ok:false, error:String(err)}); });
+}
+var registrationDraft = {name:"", contact:"", label:""};
+function startDeviceRegistration(){
+  registrationDraft = {name:"", contact:"", label:""};
+  openKeyboard("registration", "regname", "");
+}
+function submitDeviceRegistration(){
+  var s = getDeviceAuthState();
+  s.name = registrationDraft.name; s.contact = registrationDraft.contact; s.label = registrationDraft.label;
+  s.registered = true; s.status = "pending";
+  saveDeviceAuthState(s);
+  backendPost({action:"register", deviceId:deviceId, name:registrationDraft.name, contact:registrationDraft.contact, deviceLabel:registrationDraft.label}, function(res){
+    var s2 = getDeviceAuthState();
+    if(res && res.ok && res.status){ s2.status = res.status; saveDeviceAuthState(s2); }
+    /* Whether this succeeded or the request itself failed (e.g. no network
+       right now), registered stays true locally either way — matchCompletionCheckAuth()
+       will keep retrying the status check after future matches regardless. */
+    renderSetup();
+  });
+}
+/* Called once per completed match (see finishMatch()) — silently checks
+   whether this device has since been approved, with no UI interruption
+   either way. Once approved, the result is permanent: never checked
+   again after that. */
+function matchCompletionCheckAuth(){
+  var s = getDeviceAuthState();
+  if(s.status==="approved") return;
+  if(!s.registered) return; /* nothing submitted yet — checkStatus would just come back "unknown" */
+  backendPost({action:"checkStatus", deviceId:deviceId}, function(res){
+    if(res && res.ok && res.status){
+      var s2 = getDeviceAuthState();
+      s2.status = res.status;
+      saveDeviceAuthState(s2);
+    }
+  });
+}
 function clearDataDirty(){ try{ localStorage.setItem("snooker_data_dirty","0"); }catch(e){} }
 function isDataDirty(){ try{ return localStorage.getItem("snooker_data_dirty")==="1"; }catch(e){ return false; } }
 /* v1.4.28: email-based backup groundwork. EmailJS's free tier doesn't
@@ -1824,6 +1904,46 @@ function buildBackupPayload(){
 }
 function estimateBackupSizeBytes(){
   try{ return new Blob([JSON.stringify(buildBackupPayload())]).size; }catch(e){ return JSON.stringify(buildBackupPayload()).length; }
+}
+/* v1.4.31y: automatic backend backup — fires silently after every
+   completed match (see finishMatch()), entirely separate from the
+   existing manual Backup Now / email / file-download paths above, which
+   are untouched and still work exactly as before. Only actually sends
+   anything once this device is approved; before that, or if the request
+   fails for any reason (no network right now, etc.), it fails silently
+   — this is a best-effort background operation, and the existing manual
+   backup paths remain available as a fallback regardless. */
+function performBackendBackup(){
+  var authState = getDeviceAuthState();
+  if(authState.status!=="approved") return;
+  var data = buildBackupPayload();
+  backendPost({action:"backup", deviceId:deviceId, data:data}, function(res){
+    if(res && res.ok){
+      setLastBackupAt(data.exportedAt);
+      clearDataDirty();
+      saveBackupSnapshotCounts({ matches:data.matches.length, breaks:data.breaks.length });
+    }
+  });
+}
+/* v1.4.31y: pulls this device's own last backup back from the backend —
+   reuses the exact same preview-then-confirm flow (openRestorePreview())
+   as the existing file-based Restore, since buildBackupPayload()'s shape
+   is exactly what validateRestoreData() already expects. Scoped, per the
+   agreed design, to ONLY this device's own backup — there's no way to
+   browse or request any other device's data, even an approved one. */
+function performBackendRestore(){
+  showOverlay();
+  document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#4fc3f7;">RESTORE</div><div class="ov-sub">Checking backend for a backup&hellip;</div></div>';
+  mode="backend_restore_loading";
+  backendPost({action:"restore", deviceId:deviceId}, function(res){
+    if(!res || !res.ok){
+      showBackupResult(res && res.error ? res.error : "Could not reach the backend, or no backup found for this device yet.", true, "RESTORE");
+      return;
+    }
+    var result = validateRestoreData(res.data);
+    if(!result.ok){ showBackupResult(result.error, true, "RESTORE"); return; }
+    openRestorePreview(result.data);
+  });
 }
 /* v1.4.28: adaptive backup-reminder cadence — instead of a fixed 7-day
    wait regardless of how much actually changed, the interval now scales
@@ -2224,7 +2344,7 @@ function migrateLocalDataIfNeeded(){
   }
   saveDataVersion(BACKUP_FORMAT_VERSION);
 }
-var BACKUP_RESTORE_MENU=["Backup Now","Share Backup","Restore Data","Back"];
+var BACKUP_RESTORE_MENU=["Backup Now","Share Backup","Restore Data","Restore from Backend","Back"];
 /* ================= v1.4.25: SETTINGS MENU =================
    Consolidates what used to be scattered across Setup page 2 (Voice
    Callouts, Voice) and its own page-1 row (Backup/Restore) into a single
@@ -2300,6 +2420,25 @@ function changeSettingsValue(delta){
 /* ---- Hints — a quick reference for on-screen controls, requested so a new
    user (or referee unfamiliar with this build) doesn't have to guess ---- */
 function openHintsScreen(){ showOverlay(); renderHintsScreen(); mode="hints_screen"; }
+/* v1.4.31y: shown instead of starting a new match once the 10-match grace
+   period is used up without approval yet — see the "start" case in
+   activateSetupRow(). Doesn't block anything else in the app; only
+   starting a genuinely new match. */
+function openDeviceLockoutScreen(){ showOverlay(); renderDeviceLockoutScreen(); mode="device_lockout"; }
+function renderDeviceLockoutScreen(){
+  var s = getDeviceAuthState();
+  var statusText = s.status==="pending" ? "still pending approval" : s.status==="rejected" ? "not approved" : "not yet registered";
+  document.getElementById("overlay-screen").innerHTML =
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:20px 40px;text-align:center;">'+
+    '<div class="ov-title" style="color:#ff8a80;">AUTHORIZATION NEEDED</div>'+
+    '<div class="ov-sub" style="max-width:480px;margin-top:10px;">This device has used its 10-match trial and is '+statusText+'. Starting a new match needs approval first — reviewing past matches, Settings, and everything else still works as normal.</div>'+
+    '<div style="background:#141b2d;border:1px solid #232c42;border-radius:12px;padding:16px 24px;margin-top:20px;">'+
+    '<div style="color:#8a91ab;font-size:13px;">Device name: <b style="color:#e8ecf4;">'+(s.label||"(not set)")+'</b></div>'+
+    '<div style="color:#8a91ab;font-size:13px;margin-top:4px;">Registered as: <b style="color:#e8ecf4;">'+(s.name||"(not set)")+'</b></div>'+
+    '</div>'+
+    '<div class="ov-hint" style="margin-top:20px;">Center or Play/Pause = back</div>'+
+    '</div>';
+}
 /* v1.4.31o TEMP: Key Code Test screen — see the keydown/keyup listener
    comments above for how input capture works while this is open. Whole
    feature (this block, the two listener guards, the Setup page 1 row,
@@ -2982,6 +3121,16 @@ function activateSetupRow(){
   else if(key==="hiddenroster"){ openHiddenRosterView(); }
   else if(key==="shootoutrules"){ openShootoutRules(); }
   else if(key==="start"){
+    /* v1.4.31y: authorization gate — checked at the single point every
+       route to starting a genuinely new match funnels through (Page 1's
+       Continue only advances to Page 2's config; this is where a match
+       actually begins). Only blocks STARTING a new match — reviewing
+       Playing History, Settings, etc. all still work regardless. */
+    var authState = getDeviceAuthState();
+    if((authState.matchCount||0)>=10 && authState.status!=="approved"){
+      openDeviceLockoutScreen();
+      return;
+    }
     /* v1.4.26: guard against the (very unlikely, but possible) case of
        reaching Continue while a player slot still shows "Add New Player" —
        e.g. selecting it then navigating away with Up/Down instead of
@@ -4250,6 +4399,16 @@ function finishMatch(){
       frames: match.frameHistory, matchDurationMs: match.matchElapsedMs, wasAbandoned: wasAbandoned, isDraw: isDraw,
       decidedOnBlue: !!match.decidedOnBlue
     });
+    /* v1.4.31y: counts toward the 10-match authorization grace period —
+       same "genuinely completed" gate as recordMatchResult() above, so an
+       abandoned-before-a-single-frame attempt doesn't burn through the
+       allowance. Also silently checks (not blocks on) whether this device
+       has been approved yet — see matchCompletionCheckAuth(). */
+    var authState = getDeviceAuthState();
+    authState.matchCount = (authState.matchCount||0) + 1;
+    saveDeviceAuthState(authState);
+    matchCompletionCheckAuth();
+    performBackendBackup();
   }
   match.decidedOnBlue=false;
   clearActiveMatch();
@@ -5517,7 +5676,7 @@ function confirmFrameComplete(){
    untouched. */
 var KB_ROWS_LETTERS=[["A","B","C","D","E","F","G"],["H","I","J","K","L","M","N"],["O","P","Q","R","S","T","U"],["V","W","X","Y","Z"],["SPACE","BACK","SAVE","CANCEL"]];
 var KB_ROWS_EMAIL=[["A","B","C","D","E","F","G"],["H","I","J","K","L","M","N"],["O","P","Q","R","S","T","U"],["V","W","X","Y","Z"],["0","1","2","3","4","5","6","7","8","9"],["@",".","-","_"],["BACK","SAVE","CANCEL"]];
-function currentKbRows(){ return kbMode==="backupemail" ? KB_ROWS_EMAIL : KB_ROWS_LETTERS; }
+function currentKbRows(){ return (kbMode==="backupemail"||kbMode==="regcontact"||kbMode==="reglabel") ? KB_ROWS_EMAIL : KB_ROWS_LETTERS; }
 var kbCursor={row:0,col:0}, kbTarget=null, kbText="", kbMode="add", kbError="";
 function openKeyboard(t, kbModeArg, prefill){ kbTarget=t; kbMode=kbModeArg||"add"; kbText=prefill||""; kbError=""; kbCursor={row:0,col:0}; renderKeyboard(); document.getElementById("kb-overlay").classList.add("open"); }
 /* v1.4.26: if the "Add New Player" sentinel (index===roster.length) is
@@ -5531,7 +5690,7 @@ function revertRosterSentinels(){
 }
 function closeKeyboard(){ document.getElementById("kb-overlay").classList.remove("open"); kbTarget=null; kbError=""; }
 function renderKeyboard(){
-  document.getElementById("kb-title").textContent = kbMode==="rename" ? "Rename Player" : kbMode==="backupemail" ? "Backup Email Address" : "Enter Player Name";
+  document.getElementById("kb-title").textContent = kbMode==="rename" ? "Rename Player" : kbMode==="backupemail" ? "Backup Email Address" : kbMode==="regname" ? "Your Name" : kbMode==="regcontact" ? "Email or Phone" : kbMode==="reglabel" ? "Name This Device" : "Enter Player Name";
   document.getElementById("kb-text").textContent=kbText;
   document.getElementById("kb-error").textContent=kbError;
   var grid=document.getElementById("kb-grid"); grid.innerHTML="";
@@ -5547,6 +5706,34 @@ function kbPress(){
   if(cell==="SPACE"){ kbText+=" "; kbError=""; }
   else if(cell==="BACK"){ kbText=kbText.slice(0,-1); kbError=""; }
   else if(cell==="SAVE"){
+    /* v1.4.31y: three-step device registration (name -> contact -> device
+       label), each step its own keyboard screen chained via openKeyboard(),
+       ending in submitDeviceRegistration(). Placed before the other SAVE
+       branches, same early-return pattern as backupemail below. */
+    if(kbMode==="regname"){
+      var rname=kbText.trim();
+      if(rname.length===0){ kbError="Please enter a name."; renderKeyboard(); return; }
+      registrationDraft.name=rname;
+      closeKeyboard();
+      openKeyboard("registration","regcontact","");
+      return;
+    }
+    if(kbMode==="regcontact"){
+      var rcontact=kbText.trim();
+      if(rcontact.length===0){ kbError="Please enter an email or phone number."; renderKeyboard(); return; }
+      registrationDraft.contact=rcontact;
+      closeKeyboard();
+      openKeyboard("registration","reglabel","");
+      return;
+    }
+    if(kbMode==="reglabel"){
+      var rlabel=kbText.trim();
+      if(rlabel.length===0){ kbError="Please enter a name for this device, e.g. Table 1."; renderKeyboard(); return; }
+      registrationDraft.label=rlabel;
+      closeKeyboard();
+      submitDeviceRegistration();
+      return;
+    }
     /* v1.4.28: Backup Email is a distinct kbMode — unlike a player name, an
        empty value is a valid, intentional choice here (clears the address),
        and this keyboard was opened from the Settings menu, not Setup, so it
@@ -5584,6 +5771,11 @@ function kbPress(){
   }
   else if(cell==="CANCEL"){
     if(kbMode==="backupemail"){ closeKeyboard(); renderSettingsMenu(); return; }
+    /* v1.4.31y: cancelling any registration step abandons the whole draft —
+       registered stays false, so it'll simply be offered again on a future
+       app launch rather than being lost forever or nagging again this
+       session. */
+    if(kbMode==="regname"||kbMode==="regcontact"||kbMode==="reglabel"){ registrationDraft={name:"",contact:"",label:""}; closeKeyboard(); renderSetup(); return; }
     revertRosterSentinels(); closeKeyboard(); return;
   }
   else { kbText+=cell; kbError=""; }
@@ -5895,6 +6087,15 @@ function onKeyTap(code){
     if(code===13||code===179){ renderSettingsMenu(); mode="settings_menu"; }
     return;
   }
+  if(mode==="device_lockout"){
+    if(code===13||code===179){
+      hideOverlay();
+      document.getElementById("stage").style.display="flex";
+      mode="setup1";
+      renderSetup();
+    }
+    return;
+  }
   if(mode==="shootout_settings"){
     var ssRow=SHOOTOUT_SETTINGS_ROWS[shootoutSettingsRow];
     if(code===13){
@@ -5932,6 +6133,7 @@ function onKeyTap(code){
       if(brChoice==="Backup Now"){ performBackup(false); }
       else if(brChoice==="Share Backup"){ performShareBackup(); }
       else if(brChoice==="Restore Data"){ triggerRestorePicker(); }
+      else if(brChoice==="Restore from Backend"){ performBackendRestore(); }
       else { renderSettingsMenu(); mode="settings_menu"; } /* Back */
     }
     return;
@@ -6401,7 +6603,15 @@ function overlayMoveIndex(delta,len,renderFn){ overlayRowIndex=(overlayRowIndex+
 renderSetup();
 renderTopBreaks();
 applyButtonInfoVisibility();
-if(shouldShowWhatsNew()){ openWhatsNew(); } else { maybeShowBackupReminder(); }
+/* v1.4.31y: registration prompt sits between the two existing first-run
+   checks — after What's New (unrelated, higher priority, one-time-per-
+   version), before the backup reminder (registration matters more right
+   now, but isn't urgent enough to ever preempt What's New). Only fires
+   at all if not already registered; harmless to skip a launch here since
+   there's no rush — 10 matches' worth of buffer before lockout. */
+if(shouldShowWhatsNew()){ openWhatsNew(); }
+else if(!getDeviceAuthState().registered){ startDeviceRegistration(); }
+else { maybeShowBackupReminder(); }
 })();
 </script>
 </body>
