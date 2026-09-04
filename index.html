@@ -643,7 +643,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31an";
+var APP_VERSION = "1.4.31at";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -658,7 +658,7 @@ var APP_VERSION = "1.4.31an";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31an", date:"2026-09-01", notes:[
+  { version:"1.4.31at", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -2519,19 +2519,55 @@ var adminConfirmMessage="";
 var adminConfirmAction=null;
 var adminConfirmChoice=1; /* 0=Delete, 1=Cancel — defaults to Cancel every time, for safety */
 var adminConfirmReturnTo=null; /* function to call if Cancel is chosen, or after a successful delete */
+/* v1.4.31at: every destructive admin confirm now attempts a silent backup
+   email first, if one is configured — per direct request, so there's a
+   safety net before anything irreversible happens. Deliberately NOT the
+   soft-delete/"hide instead of delete" alternative also raised — that
+   would need updating every one of the 16 places match history gets read
+   throughout the app (checked directly, not guessed) to consistently
+   exclude hidden matches everywhere they're displayed or calculated from
+   (Playing History's own list, head-to-head, overall records, Top
+   Breaks...) — missing even one would mean a "hidden" match still shows
+   up somewhere, which is worse than a clean delete. A pre-delete backup
+   gets most of the same safety with far less risk of getting it wrong. */
+var adminBackupStatus=null; /* null=no backup email configured, "pending"|"success"|"failed" otherwise */
 function openAdminConfirm(message, onConfirm, returnTo){
   adminConfirmMessage=message;
   adminConfirmAction=onConfirm;
   adminConfirmReturnTo=returnTo||openAdminMenu;
   adminConfirmChoice=1;
+  var addr=loadBackupEmail();
+  if(addr){
+    adminBackupStatus="pending";
+    performEmailBackup(addr, true);
+    /* performEmailBackup's own silent mode gives no completion callback —
+       checking getLastBackupAt() a moment later is a simple, good-enough
+       way to tell success from failure without needing to change that
+       function's signature just for this. */
+    var backupStartedAt=Date.now();
+    setTimeout(function(){
+      var stillOnThisConfirm = mode==="admin_confirm" && adminConfirmMessage===message;
+      var lastBackup=getLastBackupAt();
+      adminBackupStatus = (lastBackup && new Date(lastBackup).getTime()>=backupStartedAt) ? "success" : "failed";
+      if(stillOnThisConfirm) renderAdminConfirm();
+    }, 2500);
+  } else {
+    adminBackupStatus=null;
+  }
   renderAdminConfirm();
   mode="admin_confirm";
 }
 function renderAdminConfirm(){
+  var backupLine="";
+  if(adminBackupStatus==="pending") backupLine='<div style="color:#8a91ab;font-size:13px;margin-bottom:10px;">Backing up by email first&hellip;</div>';
+  else if(adminBackupStatus==="success") backupLine='<div style="color:#00e676;font-size:13px;margin-bottom:10px;">&#10003; Backup emailed successfully</div>';
+  else if(adminBackupStatus==="failed") backupLine='<div style="color:#ff5252;font-size:13px;margin-bottom:10px;">&#9888; Backup email failed &mdash; check your connection before proceeding</div>';
+  else backupLine='<div style="color:#6c7590;font-size:13px;margin-bottom:10px;">No Backup Email configured &mdash; proceeding without a backup</div>';
   document.getElementById("overlay-screen").innerHTML=
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:0 40px;text-align:center;">'+
     '<div class="ov-title" style="color:#ff5252;">ARE YOU SURE?</div>'+
     '<div class="ov-sub" style="margin:16px 0;max-width:480px;">'+adminConfirmMessage+'</div>'+
+    backupLine+
     '<div style="display:flex;gap:20px;">'+
     '<div style="padding:10px 24px;border-radius:12px;border:2px solid '+(adminConfirmChoice===0?"#ff5252":"#232c42")+';color:'+(adminConfirmChoice===0?"#ff5252":"#8a91ab")+';font-weight:700;">Delete</div>'+
     '<div style="padding:10px 24px;border-radius:12px;border:2px solid '+(adminConfirmChoice===1?"#00e676":"#232c42")+';color:'+(adminConfirmChoice===1?"#00e676":"#8a91ab")+';font-weight:700;">Cancel</div>'+
@@ -2544,33 +2580,72 @@ function activateAdminConfirm(){
   else { adminConfirmReturnTo(); }
 }
 
-/* ---- Flow A: delete one specific match, picked from ALL history ---- */
-var adminAllMatches=[];
-var adminDeleteMatchList=[];
-var adminDeleteMatchIndex=0;
+/* ---- Flow A: delete one specific match — redesigned per direct feedback
+   as a two-step process, since browsing every match one at a time doesn't
+   scale once there's real history. Step 1 picks a player to filter by
+   (reusing the same browsing style as the player picker below); Step 2
+   shows a real scrollable list of just that player's matches (reusing the
+   same .mr-row list style Playing History already uses, for visual
+   consistency), not a one-at-a-time browser. ---- */
+var adminFilterPlayerIndex=0;
 function openAdminDeleteMatchPicker(){
-  adminAllMatches = loadMatches();
-  adminDeleteMatchList = adminAllMatches.map(function(m,idx){ return {m:m, idx:idx}; }).sort(function(a,b){ return new Date(b.m.date)-new Date(a.m.date); });
-  adminDeleteMatchIndex=0;
-  renderAdminDeleteMatchPicker();
-  mode="admin_delete_match_picker";
+  adminFilterPlayerIndex=0;
+  renderAdminDeleteFilterPlayer();
+  mode="admin_delete_filter_player";
 }
-function renderAdminDeleteMatchPicker(){
-  if(adminDeleteMatchList.length===0){
-    document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#ff5252;">DELETE A MATCH</div><div class="ov-sub">No matches recorded yet.</div><div class="ov-hint" style="margin-top:16px;">Center or Play/Pause = back</div></div>';
+function renderAdminDeleteFilterPlayer(){
+  if(roster.length===0){
+    document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#ff5252;">DELETE A MATCH</div><div class="ov-sub">No players in the roster.</div><div class="ov-hint" style="margin-top:16px;">Center or Play/Pause = back</div></div>';
     return;
   }
-  var entry=adminDeleteMatchList[adminDeleteMatchIndex];
-  var m=entry.m;
-  var label = m.p1+'  '+m.score1+' - '+m.score2+'  '+m.p2;
+  var name=roster[adminFilterPlayerIndex];
+  var count=loadMatches().filter(function(m){ return m.p1===name || m.p2===name; }).length;
   document.getElementById("overlay-screen").innerHTML=
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
     '<div class="ov-title" style="color:#ff5252;">DELETE A MATCH</div>'+
-    '<div style="font-size:14px;color:#6c7590;margin:8px 0;">Match '+(adminDeleteMatchIndex+1)+' of '+adminDeleteMatchList.length+'</div>'+
-    '<div style="font-size:26px;font-weight:700;color:#e8ecf4;margin-bottom:6px;">'+label+'</div>'+
-    '<div style="font-size:14px;color:#8a91ab;margin-bottom:20px;">'+formatDateWithYear(m.date)+'</div>'+
-    '<div class="ov-hint">&#9664;&#9666; browse matches &middot; Center = delete this match &middot; Play/Pause = back</div>'+
+    '<div class="ov-sub" style="margin-top:8px;">Find a match by player</div>'+
+    '<div class="row active" style="width:280px;margin:20px 0 8px;justify-content:center;"><div class="chev">◀</div><div class="value" style="flex:0 1 auto;padding:0 16px;">'+name+'</div><div class="chev">▶</div></div>'+
+    '<div style="font-size:14px;color:#8a91ab;margin-bottom:20px;">'+count+' match'+(count===1?'':'es')+' on record</div>'+
+    '<div class="ov-hint">&#9664;&#9666; choose player &middot; Center = view their matches &middot; Play/Pause = back</div>'+
     '</div>';
+}
+var adminAllMatches=[];
+var adminDeleteMatchList=[];
+var adminDeleteMatchIndex=0;
+function openAdminDeleteFilteredList(){
+  var name=roster[adminFilterPlayerIndex];
+  if(!name) return;
+  adminAllMatches = loadMatches();
+  adminDeleteMatchList = adminAllMatches
+    .map(function(m,idx){ return {m:m, idx:idx}; })
+    .filter(function(entry){ return entry.m.p1===name || entry.m.p2===name; })
+    .sort(function(a,b){ return new Date(b.m.date)-new Date(a.m.date); });
+  adminDeleteMatchIndex=0;
+  renderAdminDeleteFilteredList();
+  mode="admin_delete_filtered_list";
+}
+function renderAdminDeleteFilteredList(){
+  var name=roster[adminFilterPlayerIndex];
+  if(adminDeleteMatchList.length===0){
+    document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#ff5252;">'+name+'\u2019S MATCHES</div><div class="ov-sub">No matches found.</div><div class="ov-hint" style="margin-top:16px;">Play/Pause = back</div></div>';
+    return;
+  }
+  var headerRow='<div class="mr-row mr-header"><span class="mr-date">Date</span><span class="mr-score">Score</span><span class="mr-breaks">Opponent</span></div>';
+  var rows=adminDeleteMatchList.map(function(entry,i){
+    var m=entry.m;
+    var opponent = m.p1===name ? m.p2 : m.p1;
+    var activeCls = i===adminDeleteMatchIndex ? ' active' : '';
+    return '<div class="mr-row selectable'+activeCls+'"><span class="mr-date">'+formatDateWithYear(m.date)+'</span><span class="mr-score">'+m.score1+'-'+m.score2+'</span><span class="mr-breaks">'+opponent+'</span></div>';
+  }).join("");
+  document.getElementById("overlay-screen").innerHTML=
+    '<div style="display:flex;flex-direction:column;align-items:center;height:100%;padding:20px 30px;">'+
+    '<div class="ov-title" style="color:#ff5252;">'+name+'\u2019S MATCHES</div>'+
+    '<div class="stat-card" style="width:520px;margin-top:16px;"><div id="admin-delete-list" class="scroll-cue-wrap" style="max-height:280px;overflow:auto;">'+headerRow+rows+'</div></div>'+
+    '<div class="ov-hint" style="margin-top:16px;">&#9650;&#9660; browse &middot; Center = delete selected match &middot; Play/Pause = back</div>'+
+    '</div>';
+  var activeItem=document.querySelector("#admin-delete-list .mr-row.active");
+  scrollElementIntoViewWithin(document.getElementById("admin-delete-list"), activeItem);
+  updateScrollCueById("admin-delete-list");
 }
 function confirmDeleteSingleMatch(){
   if(adminDeleteMatchList.length===0) return;
@@ -2580,8 +2655,13 @@ function confirmDeleteSingleMatch(){
   openAdminConfirm('Permanently delete this match: '+label+'?', function(){
     adminAllMatches.splice(entry.idx, 1);
     saveMatches(adminAllMatches);
-    openAdminMenu();
-  }, openAdminDeleteMatchPicker);
+    /* v1.4.31aq: returns to the same filtered list rather than all the way
+       back to the main Admin Menu — re-fetches fresh, so the just-deleted
+       match correctly no longer appears, and lets another one for the
+       same player be deleted right away without re-navigating the player
+       picker each time. */
+    openAdminDeleteFilteredList();
+  }, openAdminDeleteFilteredList);
 }
 
 /* ---- Flow B: remove every match involving one chosen player ---- */
@@ -2601,7 +2681,7 @@ function renderAdminPlayerPicker(){
   document.getElementById("overlay-screen").innerHTML=
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
     '<div class="ov-title" style="color:#ff5252;">REMOVE MATCHES BY PLAYER</div>'+
-    '<div style="font-size:32px;font-weight:700;color:#e8ecf4;margin:20px 0 8px;">'+name+'</div>'+
+    '<div class="row active" style="width:280px;margin:20px 0 8px;justify-content:center;"><div class="chev">◀</div><div class="value" style="flex:0 1 auto;padding:0 16px;">'+name+'</div><div class="chev">▶</div></div>'+
     '<div style="font-size:14px;color:#8a91ab;margin-bottom:20px;">'+count+' match'+(count===1?'':'es')+' would be deleted</div>'+
     '<div class="ov-hint">&#9664;&#9666; choose player &middot; Center = remove their matches &middot; Play/Pause = back</div>'+
     '</div>';
@@ -2641,7 +2721,7 @@ function renderAdminDatePicker(){
   var fieldsHtml=fields.map(function(f,i){
     return '<div style="display:flex;flex-direction:column;align-items:center;margin:0 14px;">'+
       '<div style="font-size:12px;color:#6c7590;text-transform:uppercase;margin-bottom:4px;">'+f.label+'</div>'+
-      '<div style="font-size:32px;font-weight:700;padding:6px 18px;border-radius:12px;border:2px solid '+(i===adminDateFocus?"#ff5252":"transparent")+';color:'+(i===adminDateFocus?"#ff5252":"#e8ecf4")+';">'+f.value+'</div>'+
+      '<div style="font-size:32px;font-weight:700;padding:6px 18px;border-radius:12px;border:2px solid '+(i===adminDateFocus?"#00e676":"transparent")+';color:'+(i===adminDateFocus?"#00e676":"#e8ecf4")+';">'+f.value+'</div>'+
       '</div>';
   }).join("");
   document.getElementById("overlay-screen").innerHTML=
@@ -2649,7 +2729,7 @@ function renderAdminDatePicker(){
     '<div class="ov-title" style="color:#ff5252;">REMOVE MATCHES BEFORE DATE</div>'+
     '<div style="display:flex;margin:20px 0;">'+fieldsHtml+'</div>'+
     '<div style="font-size:14px;color:#8a91ab;margin-bottom:20px;">'+count+' match'+(count===1?'':'es')+' before this date would be deleted</div>'+
-    '<div class="ov-hint">&#9650;&#9660; choose field &middot; &#9664;&#9666; adjust &middot; Center = remove &middot; Play/Pause = back</div>'+
+    '<div class="ov-hint">&#9664;&#9666; choose field &middot; &#9650;&#9660; adjust &middot; Center = remove &middot; Play/Pause = back</div>'+
     '</div>';
 }
 function adjustAdminDateField(delta){
@@ -3379,7 +3459,9 @@ function activateSetupRow(){
 
 /* ================= MATCH READY + TOSS ================= */
 var mreadyRecentList=[];
-function reviewExtraRows(){ return ["continue","back"]; } /* v1.4.31e: explicit Back row added, replacing Play/Pause-as-back — see the mready_review key handlers for the corresponding removal. */
+function reviewExtraRows(){ return ["continueOrBack"]; } /* v1.4.31ap: Continue and Back are now ONE combined row-slot (see reviewContinueOrBackChoice) — Up/Down moves onto/off this slot as a single item, Left/Right switches between the two options within it, matching their side-by-side visual layout. */
+var reviewContinueOrBackChoice=0; /* 0=Continue, 1=Back */
+function focusPlayingHistoryContinue(){ overlayRowIndex = mreadyRecentList.length + reviewExtraRows().indexOf("continueOrBack"); reviewContinueOrBackChoice=0; }
 function reviewRowCount(){ return mreadyRecentList.length + reviewExtraRows().length; }
 function reviewHandicapLabel(){
   var c=match.config;
@@ -3414,12 +3496,16 @@ function reviewCycleHandicapStep(delta){
 function handicapSetupRows(){
   /* v1.4.31h: "handicapMode" replaces the old separate toggle+type rows;
      an explicit "back" row replaces Play/Pause-as-back, matching this
-     walkthrough's new design language (see renderMatchReview()). */
+     walkthrough's new design language (see renderMatchReview()).
+     v1.4.31ap: Continue and Back are now one combined row-slot
+     ("continueOrBack"), matching their side-by-side layout — see
+     handicapContinueOrBackChoice. */
   var r=["handicapMode"];
   if(match.config.handicapType!=="None"){ r.push("handicapValue"); if(match.config.handicapType==="Variable") r.push("handicapStep"); }
-  r.push("continue","back");
+  r.push("continueOrBack");
   return r;
 }
+var handicapContinueOrBackChoice=0; /* 0=Continue, 1=Back */
 function goMatchReady(){
   var selectedFormat = FORMATS[state.formatIndex]==="Best of" ? ("Best of "+state.bestOfN) : FORMATS[state.formatIndex];
   var config={ player1:roster[state.p1Index], player2:roster[state.p2Index], format:selectedFormat,
@@ -3434,7 +3520,14 @@ function goMatchReady(){
   mreadyRecentList=[];
   for(var i=full.length-1; i>=Math.max(0,full.length-3); i--){ mreadyRecentList.push({match:full[i], fullIndex:i}); }
   showOverlay();
-  overlayRowIndex = reviewRowCount()-1; /* default focus: Continue row (always last) */
+  /* v1.4.31ao BUG FIX: this used to assume Continue was always the LAST
+     row (true before the explicit Back row was added after it, per the
+     "new page opens with Continue focused" convention established this
+     round) — since Back is now actually last, this was defaulting focus
+     onto Back instead every time the page opened. Now finds Continue's
+     real position directly via the shared helper, regardless of where it
+     sits in the list. */
+  focusPlayingHistoryContinue();
   renderMatchReview();
 }
 function renderMatchReview(){
@@ -3485,16 +3578,20 @@ function renderMatchReview(){
   var isShootoutMatch = config.format==="Shootout";
   var extras = reviewExtraRows();
   var baseIdx = mreadyRecentList.length;
-  function extraActive(key){ return overlayRowIndex===(baseIdx+extras.indexOf(key)); }
-  var continueActiveCls = extraActive("continue") ? ' active' : '';
-  var backActiveCls = extraActive("back") ? ' active' : '';
+  var onContinueOrBackRow = overlayRowIndex===(baseIdx+extras.indexOf("continueOrBack"));
+  var continueActiveCls = (onContinueOrBackRow && reviewContinueOrBackChoice===0) ? ' active' : '';
+  var backActiveCls = (onContinueOrBackRow && reviewContinueOrBackChoice===1) ? ' active' : '';
   /* v1.4.31e: "Continue" no longer says where it's going (matching every
      other Continue button in the app) — an explicit Back row replaces the
      old Play/Pause-as-back shortcut, and both are pinned to the actual
      bottom of the page via margin-top:auto on the wrapper below them,
      rather than sitting immediately under the matches card with a gap
-     underneath on a page with little history. */
-  var reviewHint = '&#9650;&#9660; move &middot; Center select';
+     underneath on a page with little history.
+     v1.4.31ap: Continue/Back are one combined Up/Down row-slot (per direct
+     feedback, since they're laid out side by side) — Left/Right switches
+     which of the two is selected within it, matching the visual layout
+     instead of treating them as two separate Up/Down stops. */
+  var reviewHint = onContinueOrBackRow ? '&#9664;&#9666; select &middot; Center confirm' : '&#9650;&#9660; move &middot; Center select';
   document.getElementById("overlay-screen").innerHTML =
     '<div id="match-review-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:4px;padding-bottom:4px;overflow-y:auto;">'+
     '<div style="font-size:13px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Playing History</div>'+
@@ -3564,8 +3661,10 @@ function renderHandicapSetup(){
         '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP2)+'</div></div>'+
     '</div>'+
     (h2hText?'<div class="h2h-line" style="text-align:center;margin-bottom:22px;">'+h2hText+'</div>':'<div style="margin-bottom:22px;"></div>');
-  var continueActiveCls = active("continue") ? ' active' : '';
-  var backActiveCls = active("back") ? ' active' : '';
+  var onContinueOrBackRow = active("continueOrBack");
+  var continueActiveCls = (onContinueOrBackRow && handicapContinueOrBackChoice===0) ? ' active' : '';
+  var backActiveCls = (onContinueOrBackRow && handicapContinueOrBackChoice===1) ? ' active' : '';
+  var handicapHint = onContinueOrBackRow ? '&#9664;&#9666; select &middot; Center confirm' : '&#9650;&#9660; move &middot; &#9664;&#9666; adjust &middot; Center select';
   document.getElementById("overlay-screen").innerHTML =
     '<div id="handicap-setup-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:4px;padding-bottom:4px;overflow-y:auto;">'+
     '<div style="font-size:13px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;">Handicap Setup</div>'+
@@ -3576,7 +3675,7 @@ function renderHandicapSetup(){
     '<div class="row action-row'+continueActiveCls+'" style="flex:1;justify-content:center;"><div class="value">Continue</div></div>'+
     '<div class="row back-row'+backActiveCls+'" style="flex:1;justify-content:center;"><div class="value">◀ Back</div></div>'+
     '</div>'+
-    '<div class="ov-hint" style="margin-top:10px;">&#9650;&#9660; move &middot; &#9664;&#9666; adjust &middot; Center select</div>'+
+    '<div class="ov-hint" style="margin-top:10px;">'+handicapHint+'</div>'+
     '</div>'+
     '</div>';
   mode="handicap_setup";
@@ -6412,9 +6511,14 @@ function onKeyTap(code){
     else if(code===179){ adminConfirmReturnTo(); }
     return;
   }
-  if(mode==="admin_delete_match_picker"){
-    if(code===13){ confirmDeleteSingleMatch(); }
+  if(mode==="admin_delete_filter_player"){
+    if(code===13){ openAdminDeleteFilteredList(); }
     else if(code===179){ openAdminMenu(); }
+    return;
+  }
+  if(mode==="admin_delete_filtered_list"){
+    if(code===13){ confirmDeleteSingleMatch(); }
+    else if(code===179){ openAdminDeleteMatchPicker(); }
     return;
   }
   if(mode==="admin_player_picker"){
@@ -6494,10 +6598,12 @@ function onKeyTap(code){
     if(code===13){
       var extras=reviewExtraRows(), baseIdx=mreadyRecentList.length, pos=overlayRowIndex-baseIdx;
       if(pos>=0 && pos<extras.length){
-        if(extras[pos]==="continue"){
-          if(match.config.format==="Shootout"){ renderCoinToss(); }
-          else { overlayRowIndex=0; renderHandicapSetup(); }
-        } else if(extras[pos]==="back"){ returnToSetup2(); }
+        if(extras[pos]==="continueOrBack"){
+          if(reviewContinueOrBackChoice===0){
+            if(match.config.format==="Shootout"){ renderCoinToss(); }
+            else { overlayRowIndex=0; handicapContinueOrBackChoice=0; renderHandicapSetup(); }
+          } else { returnToSetup2(); }
+        }
       } else {
         var entry=mreadyRecentList[overlayRowIndex];
         openMatchScorecard(entry.match.p1, entry.match.p2, entry.fullIndex, function(){ renderMatchReview(); });
@@ -6510,21 +6616,22 @@ function onKeyTap(code){
        replaces it, matching this walkthrough's design language. */
     if(code===13){
       var rows=handicapSetupRows();
-      if(rows[overlayRowIndex]==="continue"){ renderCoinToss(); }
-      else if(rows[overlayRowIndex]==="back"){
-        /* Row counts differ between the two pages — reset to Playing
-           History's own Continue row rather than carrying over an index
-           that may not even exist there. */
-        var extras=reviewExtraRows(), baseIdx=mreadyRecentList.length;
-        overlayRowIndex=baseIdx+extras.indexOf("continue");
-        renderMatchReview();
+      if(rows[overlayRowIndex]==="continueOrBack"){
+        if(handicapContinueOrBackChoice===0){ renderCoinToss(); }
+        else {
+          /* Row counts differ between the two pages — reuse the shared
+             helper rather than recalculating (and risking going stale
+             again the way this did once already — see its own comment). */
+          focusPlayingHistoryContinue();
+          renderMatchReview();
+        }
       }
     }
     return;
   }
   if(mode==="mready_toss"){
     if(code===13){ startCoinSpin("mready_pick"); }
-    else if(code===179){ if(match.config.handicapType==="None") renderMatchReview(); else { overlayRowIndex=handicapSetupRows().length-1; renderHandicapSetup(); } }
+    else if(code===179){ if(match.config.handicapType==="None"){ focusPlayingHistoryContinue(); renderMatchReview(); } else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); } }
     return;
   }
   if(mode==="mready_toss_spinning"){ return; } /* input ignored while the coin is mid-spin */
@@ -6532,7 +6639,7 @@ function onKeyTap(code){
     /* Shootout only — manual lag entry, see enterLagWinner() above. */
     if(code===227){ enterLagWinner(1,"mready_pick"); }
     else if(code===228){ enterLagWinner(2,"mready_pick"); }
-    else if(code===179){ if(match.config.handicapType==="None") renderMatchReview(); else { overlayRowIndex=handicapSetupRows().length-1; renderHandicapSetup(); } }
+    else if(code===179){ if(match.config.handicapType==="None"){ focusPlayingHistoryContinue(); renderMatchReview(); } else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); } }
     return;
   }
   if(mode==="shootout_replay_prompt"){
@@ -6864,9 +6971,17 @@ function handleNavKeydown(code, kbOpen){
     var totalRows=reviewRowCount();
     if(code===38) overlayMoveIndex(-1,totalRows,renderMatchReview);
     else if(code===40) overlayMoveIndex(1,totalRows,renderMatchReview);
-    /* v1.4.25: no Left/Right behaviour left here — the Handicap toggle moved
-       to its own screen (see handicap_setup below), and this screen only
-       ever has the single "Continue" row now. */
+    /* v1.4.31ap: Left/Right now switches between Continue and Back while
+       that combined row-slot has focus (see reviewExtraRows()/
+       reviewContinueOrBackChoice) — matches their side-by-side layout.
+       No-op everywhere else, same as before. */
+    else if(code===37||code===39){
+      var extras=reviewExtraRows(), baseIdx=mreadyRecentList.length, pos=overlayRowIndex-baseIdx;
+      if(pos>=0 && pos<extras.length && extras[pos]==="continueOrBack"){
+        reviewContinueOrBackChoice = reviewContinueOrBackChoice===0 ? 1 : 0;
+        renderMatchReview();
+      }
+    }
     return;
   }
   if(mode==="handicap_setup"){
@@ -6878,6 +6993,7 @@ function handleNavKeydown(code, kbOpen){
       if(key==="handicapMode") handicapModeCycle(delta);
       else if(key==="handicapValue"){ var hstep=match.config.handicapType==="Fixed"?1:5; match.config.handicapValue+=delta*hstep; match.config.startHandicapValue=match.config.handicapValue; }
       else if(key==="handicapStep") reviewCycleHandicapStep(delta);
+      else if(key==="continueOrBack"){ handicapContinueOrBackChoice = handicapContinueOrBackChoice===0 ? 1 : 0; }
       overlayRowIndex=Math.min(overlayRowIndex, handicapSetupRows().length-1);
       renderHandicapSetup();
     }
@@ -6912,10 +7028,17 @@ function handleNavKeydown(code, kbOpen){
     if(code===37||code===39){ adminConfirmChoice = adminConfirmChoice===0?1:0; renderAdminConfirm(); }
     return;
   }
-  if(mode==="admin_delete_match_picker"){
-    if(adminDeleteMatchList.length>0 && (code===37||code===39)){
-      adminDeleteMatchIndex=(adminDeleteMatchIndex+(code===39?1:-1)+adminDeleteMatchList.length)%adminDeleteMatchList.length;
-      renderAdminDeleteMatchPicker();
+  if(mode==="admin_delete_filter_player"){
+    if(roster.length>0 && (code===37||code===39)){
+      adminFilterPlayerIndex=(adminFilterPlayerIndex+(code===39?1:-1)+roster.length)%roster.length;
+      renderAdminDeleteFilterPlayer();
+    }
+    return;
+  }
+  if(mode==="admin_delete_filtered_list"){
+    if(adminDeleteMatchList.length>0 && (code===38||code===40)){
+      adminDeleteMatchIndex=(adminDeleteMatchIndex+(code===40?1:-1)+adminDeleteMatchList.length)%adminDeleteMatchList.length;
+      renderAdminDeleteFilteredList();
     }
     return;
   }
@@ -6927,10 +7050,10 @@ function handleNavKeydown(code, kbOpen){
     return;
   }
   if(mode==="admin_date_picker"){
-    if(code===38){ adminDateFocus=(adminDateFocus-1+3)%3; renderAdminDatePicker(); }
-    else if(code===40){ adminDateFocus=(adminDateFocus+1)%3; renderAdminDatePicker(); }
-    else if(code===37) adjustAdminDateField(-1);
-    else if(code===39) adjustAdminDateField(1);
+    if(code===37){ adminDateFocus=(adminDateFocus-1+3)%3; renderAdminDatePicker(); }
+    else if(code===39){ adminDateFocus=(adminDateFocus+1)%3; renderAdminDatePicker(); }
+    else if(code===38) adjustAdminDateField(1);
+    else if(code===40) adjustAdminDateField(-1);
     return;
   }
   if(mode==="restore_preview"){ if(code===38||code===40){ restorePreviewRow=restorePreviewRow===0?1:0; renderRestorePreview(); } return; }
