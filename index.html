@@ -210,7 +210,7 @@
   .lv-player-mid { margin:0; flex-shrink:0; }
   .lv-player .score { font-size:clamp(40px, 9vh, 72px); font-weight:700; color:#b8bfd1; line-height:1; }
   .lv-player.active .score { color:#00e676; }
-  .lv-player .frames { display:inline-block; margin:8px auto 0; background:#0b0f19; border-radius:20px; padding:4px 16px; font-size:14px; color:#4fc3f7; }
+  .lv-player .frames { display:inline-block; margin:clamp(4px, 1.5vh, 8px) auto 0; background:#0b0f19; border-radius:20px; padding:clamp(2px, 0.8vh, 4px) 16px; font-size:clamp(11px, 1.8vh, 14px); color:#4fc3f7; }
   .lv-center { width:200px; flex-shrink:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; }
   .lv-onball { width:48px; height:48px; border-radius:50%; margin:0 auto 6px; display:flex; align-items:center; justify-content:center; box-shadow:inset -3px -3px 5px rgba(0,0,0,.4),0 2px 4px rgba(0,0,0,.5); }
   .lv-onball .ball-letter { font-size:18px; }
@@ -638,7 +638,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31ab";
+var APP_VERSION = "1.4.31ah";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -653,7 +653,7 @@ var APP_VERSION = "1.4.31ab";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31ab", date:"2026-09-01", notes:[
+  { version:"1.4.31ah", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -1389,8 +1389,27 @@ function resolveAnyClip(key){
    selection, while the pause/resume/final-beep tones (comm_ prefixed, in
    COMMENTARY_CLIPS) don't. */
 var shotClockAudioEl=null;
+var shotClockAudioGainNode=null;
 function ensureShotClockAudioEl(){
-  if(!shotClockAudioEl){ shotClockAudioEl=new Audio(); }
+  if(!shotClockAudioEl){
+    shotClockAudioEl=new Audio();
+    /* v1.4.31af: same volume-boost treatment as the main speech/commentary
+       channel above — see ensureAudioEl()'s comment for the full reasoning.
+       Currently only matters for the count_10..count_4 spoken countdown
+       clips (via resolveAnyClip()) — the four generated shot-clock tones
+       don't play through this element at all, they're synthesized directly
+       via playTone(), which has its own separate gain control. */
+    try{
+      var ctx=getShotClockToneCtx();
+      if(ctx){
+        var source=ctx.createMediaElementSource(shotClockAudioEl);
+        shotClockAudioGainNode=ctx.createGain();
+        shotClockAudioGainNode.gain.value=currentGainValue();
+        source.connect(shotClockAudioGainNode);
+        shotClockAudioGainNode.connect(ctx.destination);
+      }
+    }catch(e){}
+  }
   return shotClockAudioEl;
 }
 /* v1.4.31u: the four shot-clock tones (pause/resume/beep/buzzer) are
@@ -1555,14 +1574,63 @@ function applyButtonInfoVisibility(){
 }
 
 var speechQueue=[];
+/* v1.4.31ag: Volume is now a proper Settings row instead of a hardcoded
+   constant — see SETTINGS_MENU/changeSettingsValue() above. Persisted the
+   same way every other setting in this app is (voiceEnabled,
+   scoringModeIndex, etc.) — localStorage, loaded once at startup, saved
+   on every change. VOLUME_LEVELS is deliberately a small set of discrete
+   steps (not a free-form slider) to match this app's existing ◀▶-cycle
+   convention for every other setting, rather than introducing a new kind
+   of control just for this one. Default index 2 (180%) matches what
+   shipped as the original hardcoded starting point in v1.4.31af, before
+   this was made adjustable. */
+var VOLUME_LEVELS = [1.0, 1.4, 1.8, 2.2, 2.6, 3.0];
+var volumeLevelIndex = loadVolumeLevelIndex();
+function loadVolumeLevelIndex(){ try{ var v=parseInt(localStorage.getItem("snooker_volume_level")); return (v>=0 && v<VOLUME_LEVELS.length) ? v : 2; }catch(e){ return 2; } }
+function saveVolumeLevelIndex(i){ try{ localStorage.setItem("snooker_volume_level", i); }catch(e){} }
+function currentGainValue(){ return VOLUME_LEVELS[volumeLevelIndex]; }
+function cycleVolumeLevel(delta){
+  volumeLevelIndex=(volumeLevelIndex+delta+VOLUME_LEVELS.length)%VOLUME_LEVELS.length;
+  saveVolumeLevelIndex(volumeLevelIndex);
+  var g=currentGainValue();
+  if(speechGainNode) speechGainNode.gain.value=g;
+  if(shotClockAudioGainNode) shotClockAudioGainNode.gain.value=g;
+}
 var speechAudioEl=null;
 var speechPlaying=false;
 var speechPlayingKey=null;
+/* v1.4.31af: routes voice/commentary playback through a Web Audio API
+   GainNode, boosting volume beyond what plain <audio> playback allows —
+   .volume (the normal way to adjust an <audio> element's loudness) tops
+   out at 1.0, which was already the default with nothing in this app
+   ever turning it down, so the clips were already playing at their
+   maximum un-amplified level; getting louder than that needs actual
+   gain amplification, not a volume setting. Reuses the SAME AudioContext
+   already set up for the generated shot-clock tones
+   (getShotClockToneCtx()) rather than creating a second one. Safe to do
+   this only once per element, at creation — createMediaElementSource()
+   throws if called twice on the same element, which is why this lives
+   inside ensureAudioEl()'s create-once block rather than being set up
+   per-play. v1.4.31ag: initial gain now reads currentGainValue() (the
+   user's saved Volume setting) instead of a hardcoded constant — later
+   changes to that setting are applied live via cycleVolumeLevel() above,
+   not by recreating this node. */
+var speechGainNode=null;
 function ensureAudioEl(){
   if(!speechAudioEl){
     speechAudioEl=new Audio();
     speechAudioEl.addEventListener("ended", onClipEnded);
     speechAudioEl.addEventListener("error", onClipEnded);
+    try{
+      var ctx=getShotClockToneCtx();
+      if(ctx){
+        var source=ctx.createMediaElementSource(speechAudioEl);
+        speechGainNode=ctx.createGain();
+        speechGainNode.gain.value=currentGainValue();
+        source.connect(speechGainNode);
+        speechGainNode.connect(ctx.destination);
+      }
+    }catch(e){}
   }
   return speechAudioEl;
 }
@@ -2346,7 +2414,7 @@ var BACKUP_RESTORE_MENU=["Backup Now","Share Backup","Restore Data","Restore fro
 /* v1.4.30c: Scoring Mode moved to Setup page 2 (above Format), where it's
    more naturally part of choosing how a match will be played, rather than
    tucked away in a general Settings menu. */
-var SETTINGS_MENU=["Voice Callouts","Voice","Breaks Board","Backup Email","Backup/Restore","Hints","Back"];
+var SETTINGS_MENU=["Voice Callouts","Voice","Volume","Breaks Board","Backup Email","Backup/Restore","Hints","Back"];
 var settingsMenuRow=0;
 function openSettingsMenu(){ settingsMenuRow=0; showOverlay(); renderSettingsMenu(); mode="settings_menu"; }
 /* v1.4.27: Scoring Mode — Full (default), Easy, or Vintage. Changes how
@@ -2378,6 +2446,7 @@ function matchScoringMode(config){
 function settingsMenuValueFor(label){
   if(label==="Voice Callouts") return voiceEnabled?"On":"Off";
   if(label==="Voice") return voiceSelectionLabel();
+  if(label==="Volume") return Math.round(VOLUME_LEVELS[volumeLevelIndex]*100)+"%";
   if(label==="Breaks Board") return breaksBoardModeLabel();
   if(label==="Backup Email") return loadBackupEmail()||"Not set";
   return "";
@@ -2404,6 +2473,7 @@ function changeSettingsValue(delta){
   var choice=SETTINGS_MENU[settingsMenuRow];
   if(choice==="Voice Callouts"){ voiceEnabled=!voiceEnabled; saveVoiceEnabled(voiceEnabled); if(voiceEnabled) speak("voiceon"); else cancelSpeech(); }
   else if(choice==="Voice"){ cycleVoiceSelection(delta); if(voiceEnabled) speak("voiceon"); }
+  else if(choice==="Volume"){ cycleVolumeLevel(delta); if(voiceEnabled) speak("voiceon"); }
   else if(choice==="Breaks Board"){ cycleBreaksBoardMode(delta); renderTopBreaks(); }
   renderSettingsMenu();
 }
@@ -2772,6 +2842,7 @@ var rowEls = {
   voicesel:document.getElementById("row-voicesel"), scoringmode:document.getElementById("row-scoringmode"),
   duration:document.getElementById("row-duration"), start:document.querySelector('[data-row="start"]'),
   settings:document.querySelector('[data-row="settings"]'),
+  savepickertest:document.querySelector('[data-row="savepickertest"]'),
   hiddenroster:document.getElementById("row-hiddenroster"), bestof:document.getElementById("row-bestof")
 };
 
@@ -3635,7 +3706,26 @@ function markColourPotted(colour){
 }
 function endCurrentBreak(linkToUndo){
   var f=match.frame; if(!f) return;
-  if(f.breakValue>0){
+  /* v1.4.31ad BUG FIX: this whole block assumes f.breakValue/f.activePlayer
+     represent a genuinely in-progress, ball-by-ball Full Mode break still
+     awaiting attribution at frame-end. But Vintage Mode (vintageApplyDraft())
+     and Easy Mode (confirmEasyBreak()) both also write to match.frame.breakValue
+     — purely as a transient trigger for speakBreakValue()'s debounced milestone
+     checks, momentarily reusing the same field, NOT because they have an
+     unattributed break waiting. Neither mode ever resets it afterward (doing
+     so would break that debounced read, which fires later, not synchronously —
+     see speakBreakValue()). Left unguarded, this block was picking up that
+     stale leftover value at every frame end and crediting it to whichever
+     player f.activePlayer happened to default to (Vintage/Easy never set that
+     field either, having no real concept of "active player") — confirmed on a
+     real device: a match's own highest break, and every per-frame breakdown,
+     ending up attributed to the WRONG player, or duplicated onto both players'
+     match-total column. Vintage and Easy Mode already fully record their own
+     breaks correctly at confirmation time (see the matching match.highestBreakP1/
+     P2 and, as of this same fix, f.highestBreakP1/P2 updates in each function) —
+     this whole reattribution block is Full-Mode-only logic and should never run
+     for the other two. */
+  if(matchScoringMode(match.config)==="Full" && f.breakValue>0){
     var name=f.activePlayer===1?match.config.player1:match.config.player2;
     var opp=f.activePlayer===1?match.config.player2:match.config.player1;
     var priorBreaksSnapshot=loadBreaks(); /* board as it stood before this break — used by checkBreakEndCommentary() below */
@@ -5025,7 +5115,14 @@ function nextStepSize(direction){
   if(easyTapStreak<16) return 5;
   return 10;
 }
-function resetEasyEntry(){ easyFocus="counter"; easyCounterValue=0; easyButtonIndex=0; easyPickPlayer=1; easyTapStreak=0; }
+function resetEasyEntry(){
+  easyFocus="counter"; easyCounterValue=0; easyButtonIndex=0; easyPickPlayer=1; easyTapStreak=0;
+  /* v1.4.31ah: cancels any pending intermediate callout — this fires on
+     every path that zeroes the counter (confirm, cancel, etc.), so a
+     stale timer never lingers past the break it was scheduled for. */
+  if(easyIntermediateCalloutTimer){ clearTimeout(easyIntermediateCalloutTimer); easyIntermediateCalloutTimer=null; }
+  easyBreakWasFreshStart=true;
+}
 /* ================= v1.4.27: VINTAGE MODE =================
    Two wood/brass rail cards (one per player): a straight 0-19 "Units" rail
    directly slid with Left/Right, and a windowed "Twenties" rail (0,20,40...)
@@ -5342,8 +5439,15 @@ function vintageApplyDraft(applyNegative){
     var priorBreaksSnapshot=loadBreaks();
     var newBreakId=window.recordBreak(name, total, opponent, false);
     if(newBreakId && breakRecordStack.length>0){ breakRecordStack[breakRecordStack.length-1].breakId=newBreakId; }
-    if(d.player===1){ if(total>match.highestBreakP1) match.highestBreakP1=total; }
-    else { if(total>match.highestBreakP2) match.highestBreakP2=total; }
+    /* v1.4.31ad BUG FIX: match.highestBreakP1/P2 (the match-running total)
+       was already updated correctly here — but the PER-FRAME equivalent
+       (f.highestBreakP1/P2, what the Match Scorecard's per-frame column
+       actually reads) was never touched at all by Vintage Mode, previously
+       relying entirely on endCurrentBreak()'s now-removed (see that
+       function) misattribution to populate it, incorrectly. Added directly
+       here, mirroring the match-level update on the line above exactly. */
+    if(d.player===1){ if(total>match.highestBreakP1) match.highestBreakP1=total; if(total>match.frame.highestBreakP1) match.frame.highestBreakP1=total; }
+    else { if(total>match.highestBreakP2) match.highestBreakP2=total; if(total>match.frame.highestBreakP2) match.frame.highestBreakP2=total; }
     checkBreakEndCommentary(name, total, priorBreaksSnapshot, false);
     /* v1.4.30c: voice callout for every confirmed break — see the matching
        note in confirmEasyBreak() for why match.frame.breakValue is set
@@ -5440,8 +5544,12 @@ function confirmEasyBreak(player, value){
   var isShootoutBreak=false; /* Easy Mode never applies to Shootout — see matchScoringMode() */
   var newBreakId=window.recordBreak(name, value, opponent, isShootoutBreak);
   if(newBreakId && breakRecordStack.length>0){ breakRecordStack[breakRecordStack.length-1].breakId=newBreakId; }
-  if(player===1){ if(value>match.highestBreakP1) match.highestBreakP1=value; }
-  else { if(value>match.highestBreakP2) match.highestBreakP2=value; }
+  /* v1.4.31ad BUG FIX: same fix as vintageApplyDraft() — the per-frame
+     f.highestBreakP1/P2 (what the Match Scorecard's per-frame column
+     reads) was never updated by Easy Mode either, previously relying on
+     endCurrentBreak()'s now-removed misattribution to populate it. */
+  if(player===1){ if(value>match.highestBreakP1) match.highestBreakP1=value; if(value>f.highestBreakP1) f.highestBreakP1=value; }
+  else { if(value>match.highestBreakP2) match.highestBreakP2=value; if(value>f.highestBreakP2) f.highestBreakP2=value; }
   checkBreakEndCommentary(name, value, priorBreaksSnapshot, isShootoutBreak);
   /* v1.4.30c: voice callout for every confirmed break, not just Full mode's
      ball-by-ball ones. speakBreakValue() reads match.frame.breakValue for
@@ -5471,6 +5579,7 @@ function easyAdjustCounter(delta){
   var step=nextStepSize(delta>0?1:-1);
   easyCounterValue=Math.max(0,Math.min(147, easyCounterValue+delta*step));
   renderLiveEasy();
+  scheduleEasyIntermediateCallout();
 }
 /* v1.4.29: raw fixed-amount adjuster for the hold-to-repeat behaviour above —
    deliberately bypasses the tap-streak acceleration in easyAdjustCounter(),
@@ -5479,6 +5588,44 @@ function easyAdjustCounter(delta){
 function easyAdjustCounterBy(amount){
   easyCounterValue=Math.max(0,Math.min(147, easyCounterValue+amount));
   renderLiveEasy();
+  scheduleEasyIntermediateCallout();
+}
+/* v1.4.31ah: intermediate break callout — per direct request, so a large
+   break can be tracked by ear as it builds, not just heard once at the
+   end. Debounced 2 seconds of no further counter activity, NOT tied to
+   confirming — the score is never committed by this, purely a spoken
+   readback of wherever the counter currently sits. Reuses
+   speakBreakValue() directly, the exact same function confirmed breaks
+   already use — that gets the plain "break of N" callout AND the
+   milestone cheers (50/century/147) for free, entirely for free, with no
+   separate logic needed. Milestone flags are reset the moment the
+   counter first leaves zero (a genuinely new break attempt starting),
+   not on every intermediate callout — matching the same "each break is
+   its own independent thing" reasoning already used when a break is
+   actually confirmed (see confirmEasyBreak()/vintageApplyDraft()) —
+   otherwise a milestone crossed on an EARLIER confirmed break this frame
+   would incorrectly suppress the cheer for a new break reaching the same
+   milestone. The live easyCounterValue is re-checked at fire time, not
+   captured when the timer was scheduled — if the break gets confirmed
+   (which resets the counter to 0) before 2s elapses, this correctly
+   becomes a no-op instead of a stale duplicate announcement. */
+var easyIntermediateCalloutTimer=null;
+var easyBreakWasFreshStart=true;
+function scheduleEasyIntermediateCallout(){
+  if(easyIntermediateCalloutTimer){ clearTimeout(easyIntermediateCalloutTimer); easyIntermediateCalloutTimer=null; }
+  if(easyCounterValue<=0){ easyBreakWasFreshStart=true; return; }
+  easyIntermediateCalloutTimer=setTimeout(function(){
+    easyIntermediateCalloutTimer=null;
+    announceEasyIntermediateBreak();
+  }, 2000);
+}
+function announceEasyIntermediateBreak(){
+  if(!voiceEnabled || easyCounterValue<=0) return;
+  if(easyBreakWasFreshStart){
+    match.frame.breakCommentaryFlags = {fifty:false, century:false, maximum147:false};
+    easyBreakWasFreshStart=false;
+  }
+  speakBreakValue(easyCounterValue);
 }
 function easyStartPlayerPick(){
   if(easyCounterValue<=0){ return; } /* nothing to attribute — Center is a no-op on 000 */
