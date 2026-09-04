@@ -643,7 +643,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31at";
+var APP_VERSION = "1.4.31av";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -658,7 +658,7 @@ var APP_VERSION = "1.4.31at";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31at", date:"2026-09-01", notes:[
+  { version:"1.4.31av", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -880,7 +880,20 @@ function openWhatsNew(){
   mode="whats_new";
   updateScrollCueById("whatsnew-notes");
 }
-function dismissWhatsNew(){ saveLastSeenVersion(APP_VERSION); returnToSetup1(); }
+function dismissWhatsNew(){
+  saveLastSeenVersion(APP_VERSION);
+  returnToSetup1();
+  /* v1.4.31au BUG FIX: registration was only ever checked in the INIT
+     sequence's else-branch (i.e., only if What's New DIDN'T show that
+     launch) — meaning if What's New did show, dismissing it never
+     re-checked registration at all within that same session, only truly
+     on the NEXT app open. Confirmed on-device: dismissing What's New went
+     straight to Match Setup instead of into registration. Now explicitly
+     re-checked right here too, so a genuinely fresh install still gets
+     offered registration immediately after dismissing What's New, not
+     only after relaunching the app. */
+  if(!getDeviceAuthState().registered){ startDeviceRegistration(); }
+}
 
 /* ---- Shootout rules reminder (Stage 5) ----
    On-demand, not forced — a new "View Shootout Rules" action row on Setup
@@ -6313,7 +6326,23 @@ var lastMoveTime=0, MOVE_THROTTLE=150;
 
 document.addEventListener("keydown", function(e){
   var code=e.keyCode||e.which, now=Date.now();
-  if(mode==="screensaver"){ exitScreensaver(); e.preventDefault(); return; }
+  if(mode==="screensaver"){
+    /* v1.4.31av BUG FIX: this bypassed the normal keydown flow entirely
+       (by design, to catch literally any key), which meant it also
+       skipped the modeChangedOnDown tracking every other mode transition
+       in this app relies on to suppress the MATCHING keyup once mode has
+       already moved on. Confirmed on-device: dismissing the screensaver
+       with Center also immediately opened the player options menu, since
+       the keyup for that same physical press still fired onKeyTap(13)
+       against the NEW mode (setup1) with a stray Center tap — exactly the
+       failure case that tracking exists to prevent, just never applied
+       here. Fixed by marking this key's state the same way the normal
+       flow does. */
+    ks(code).modeChangedOnDown=true;
+    exitScreensaver();
+    e.preventDefault();
+    return;
+  }
   /* v1.4.31aj: secret Admin Menu — REW+FF held simultaneously, Setup page 1
      only, per direct request. Checked here (not via the normal per-key
      dispatch) since it depends on TWO keys' states at once, not a single
