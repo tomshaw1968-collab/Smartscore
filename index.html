@@ -638,7 +638,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31ah";
+var APP_VERSION = "1.4.31ai";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -653,7 +653,7 @@ var APP_VERSION = "1.4.31ah";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31ah", date:"2026-09-01", notes:[
+  { version:"1.4.31ai", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -2480,6 +2480,77 @@ function changeSettingsValue(delta){
 /* ---- Hints — a quick reference for on-screen controls, requested so a new
    user (or referee unfamiliar with this build) doesn't have to guess ---- */
 function openHintsScreen(){ showOverlay(); renderHintsScreen(); mode="hints_screen"; }
+/* v1.4.31ai: Setup page 1 idle screensaver — per direct request, 10s with
+   no activity switches to a full-screen High Break Board, auto-cycling
+   through the same views the small Top Breaks panel already offers
+   (availableTopBreaksViews()/filterBreaksForView()/topBreaksViewLabel(),
+   all reused as-is). Any key press exits immediately, back to normal
+   Setup page 1.
+   The idle timer is deliberately reset from inside renderSetup() itself
+   (see the call near the top of that function), gated on state.page===1
+   — every navigation/change on Setup page 1 already calls renderSetup()
+   at the end of its own handler, so hooking in there naturally covers
+   "any activity resets the 10s clock" for free, without needing to touch
+   the global keydown listener for that part. The listener IS touched for
+   the exit side, though (see the "screensaver" mode check right at the
+   top of the keydown handler) — that needs to catch literally any key,
+   including ones with no existing dispatch case, so it can't rely on the
+   app's normal per-key routing. */
+var setupIdleTimer=null;
+var screensaverCycleTimer=null;
+var screensaverViewIndex=0;
+function resetSetupIdleTimer(){
+  if(setupIdleTimer){ clearTimeout(setupIdleTimer); setupIdleTimer=null; }
+  if(mode==="setup1" && state.page===1){
+    setupIdleTimer=setTimeout(startScreensaver, 10000);
+  }
+}
+function startScreensaver(){
+  if(mode!=="setup1") return; /* safety check in case something changed mode without going through resetSetupIdleTimer() again */
+  screensaverViewIndex=0;
+  showOverlay();
+  renderScreensaver();
+  mode="screensaver";
+  scheduleScreensaverCycle();
+}
+function scheduleScreensaverCycle(){
+  if(screensaverCycleTimer){ clearTimeout(screensaverCycleTimer); }
+  screensaverCycleTimer=setTimeout(function(){
+    var p1=roster[state.p1Index], p2=roster[state.p2Index];
+    var views=availableTopBreaksViews(p1,p2);
+    screensaverViewIndex=(screensaverViewIndex+1)%views.length;
+    renderScreensaver();
+    scheduleScreensaverCycle();
+  }, 6000);
+}
+function exitScreensaver(){
+  if(screensaverCycleTimer){ clearTimeout(screensaverCycleTimer); screensaverCycleTimer=null; }
+  hideOverlay();
+  document.getElementById("stage").style.display="flex";
+  mode="setup1";
+  renderSetup(); /* also re-arms the idle timer via the call inside renderSetup() itself */
+}
+function renderScreensaver(){
+  var p1=roster[state.p1Index], p2=roster[state.p2Index];
+  var views=availableTopBreaksViews(p1,p2);
+  var viewId=views[screensaverViewIndex % views.length];
+  var all=loadBreaks();
+  var filtered=filterBreaksForView(all, viewId, p1, p2);
+  var top=filtered.slice().sort(function(a,c){ return c.value-a.value; }).slice(0,10);
+  var rowsHtml = top.length ? top.map(function(b,i){
+    return '<div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #1a2032;font-size:22px;">'+
+      '<span style="width:50px;color:#6c7590;">'+(i+1)+'</span>'+
+      '<span style="flex:1;color:#e8ecf4;">'+b.player+'</span>'+
+      '<span style="width:90px;text-align:right;color:#00e676;font-weight:700;">'+b.value+'</span>'+
+      '</div>';
+  }).join("") : '<div style="text-align:center;color:#3a4160;font-size:20px;margin-top:40px;">'+topBreaksEmptyLabel(viewId)+'</div>';
+  document.getElementById("overlay-screen").innerHTML =
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;">'+
+    '<div style="font-size:28px;font-weight:700;color:#4fc3f7;margin-bottom:24px;text-align:center;">'+topBreaksViewLabel(viewId,p1,p2)+'</div>'+
+    '<div style="width:100%;max-width:560px;">'+rowsHtml+'</div>'+
+    '<div style="margin-top:32px;color:#3a4160;font-size:14px;">Press any button to continue</div>'+
+    '</div>';
+}
 /* v1.4.31y: shown instead of starting a new match once the 10-match grace
    period is used up without approval yet — see the "start" case in
    activateSetupRow(). Doesn't block anything else in the app; only
@@ -2848,6 +2919,7 @@ var rowEls = {
 
 
 function renderSetup(){
+  resetSetupIdleTimer();
   document.getElementById("version-tag").textContent="v"+APP_VERSION;
   document.getElementById("v-player1").textContent = state.p1Index===roster.length ? "Add New Player" : roster[state.p1Index];
   document.getElementById("v-player2").textContent = state.p2Index===roster.length ? "Add New Player" : roster[state.p2Index];
@@ -5917,6 +5989,7 @@ var lastMoveTime=0, MOVE_THROTTLE=150;
 
 document.addEventListener("keydown", function(e){
   var code=e.keyCode||e.which, now=Date.now();
+  if(mode==="screensaver"){ exitScreensaver(); e.preventDefault(); return; }
   var kbOpen=document.getElementById("kb-overlay").classList.contains("open");
   var k=ks(code);
 
