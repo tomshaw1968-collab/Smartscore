@@ -472,6 +472,7 @@
         <div class="label"></div><div class="value">Continue</div><div class="chev"></div>
       </div>
       <div class="row back-row" data-row="hiddenroster" id="row-hiddenroster" style="display:none;"><div class="label"></div><div class="value" id="v-hiddenroster">Hidden Players (0)</div><div class="chev"></div></div>
+      <div class="row back-row" data-row="pendingrequests" id="row-pendingrequests" style="display:none;border-color:#ffa726;"><div class="label"></div><div class="value" id="v-pendingrequests" style="color:#ffa726;">Pending Requests (0)</div><div class="chev"></div></div>
       <div class="row back-row" data-row="settings"><div class="label"></div><div class="value">Settings</div><div class="chev"></div></div>
     </div>
     <div id="rows-page2" class="scroll-cue-wrap">
@@ -656,7 +657,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bb";
+var APP_VERSION = "1.4.31bd";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -671,6 +672,13 @@ var APP_VERSION = "1.4.31bb";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bd", date:"2026-09-05", notes:[
+    "New: on Setup, once this device has an admin password saved, an orange \"Pending Requests (n)\" row now appears automatically whenever there's at least one device waiting for approval — jumps straight into Manage Registrations, no need to go through the secret Admin Menu. Checked once at launch and each time you return to Setup."
+  ]},
+  { version:"1.4.31bc", date:"2026-09-05", notes:[
+    "New: Manage Registrations, in the secret Admin Menu — approve/reject pending device registrations, and browse Approved/Rejected, right on this device. No more visiting the backend's browser admin page for this. Requires the backend admin password once; this device remembers it after that.",
+    "Backend: fixed Approve/Reject links on the browser admin page not actually working (relative link resolved against the wrong domain — see SnookerBackend.gs comment). Requires redeploying the Apps Script."
+  ]},
   { version:"1.4.31bb", date:"2026-09-05", notes:[
     "Change: Coin Toss and Lag to Break now use an explicit, visible Back control instead of Play/Pause as an implicit back button, matching Playing History and Handicap Setup's design. Coin Toss: Left/Right chooses between \"Toss the Coin\" and Back, Center confirms. Lag to Break: Rewind/Fast-Forward still declare the lag winner directly as before; Down/Up moves focus onto/off the separate Back control."
   ]},
@@ -2299,7 +2307,7 @@ function showBackupResult(msg,isError,title){
     '<div class="ov-hint">Center = OK</div></div>';
   mode="backup_result";
 }
-function returnToSetup1(){ document.getElementById("overlay-screen").classList.remove("show"); document.getElementById("stage").style.display="flex"; mode="setup1"; state.page=1; state.rowIndex=0; renderSetup(); maybeShowBackupReminder(); }
+function returnToSetup1(){ document.getElementById("overlay-screen").classList.remove("show"); document.getElementById("stage").style.display="flex"; mode="setup1"; state.page=1; state.rowIndex=0; renderSetup(); maybeShowBackupReminder(); maybeCheckPendingRegistrations(); }
 
 /* v1.4.31ab: Exit App removed entirely — window.close() never actually
    worked in this WebView (confirmed on-device), and no AppCreator24 JS
@@ -2534,7 +2542,7 @@ function openHintsScreen(){ showOverlay(); renderHintsScreen(); mode="hints_scre
    its selection to Cancel — reaching Delete requires an explicit
    Left/Right move first, not just a stray Center press.
    ============================================================ */
-var ADMIN_MENU=["Delete a Match","Remove Matches by Player","Remove Matches Before Date","Wipe All Match History","Back"];
+var ADMIN_MENU=["Delete a Match","Remove Matches by Player","Remove Matches Before Date","Wipe All Match History","Manage Registrations","Back"];
 var adminMenuRow=0;
 function openAdminMenu(){ adminMenuRow=0; showOverlay(); renderAdminMenu(); mode="admin_menu"; }
 function renderAdminMenu(){
@@ -2551,7 +2559,156 @@ function activateAdminMenuRow(){
   else if(choice==="Remove Matches by Player") openAdminPlayerPicker();
   else if(choice==="Remove Matches Before Date") openAdminDatePicker();
   else if(choice==="Wipe All Match History") openAdminWipeAllConfirm();
+  else if(choice==="Manage Registrations") openAdminRegistrations();
   else returnToSetup1(); /* Back */
+}
+
+/* ============================================================
+   v1.4.31bc: Manage Registrations — the Pending/Approve/Reject
+   step used to require a separate browser visit to the backend's
+   admin page. Now built into the app itself, in the same secret
+   Admin Menu as the other maintenance actions. The admin password
+   is cached in localStorage on this device once entered correctly,
+   so it's only asked for again if it's ever wrong or cleared.
+   ============================================================ */
+function loadAdminRegPassword(){ try{ return localStorage.getItem("snooker_admin_pw")||""; }catch(e){ return ""; } }
+function saveAdminRegPassword(pw){ try{ localStorage.setItem("snooker_admin_pw", pw); }catch(e){} }
+var adminRegPassword="";
+var adminRegLists={pending:[],approved:[],rejected:[]};
+var adminRegTab=0; /* 0=Pending,1=Approved,2=Rejected */
+var adminRegRow=0;
+var adminRegLoading=false;
+var adminRegError="";
+var adminRegConfirmingId=null; /* deviceId currently showing Approve/Reject/Cancel, or null */
+var adminRegActionChoice=2; /* 0=Approve,1=Reject,2=Cancel — defaults to Cancel, same safety convention as the other Admin Menu confirms */
+/* v1.4.31bd: this screen is now reachable two ways — the secret Admin
+   Menu (backs out to openAdminMenu, as originally built) and a direct
+   shortcut row on Setup1 that only appears once this device already has
+   an admin password saved AND there's at least one pending request (see
+   activeRowsPage1()/setupPendingCount below) — that entry point should
+   back out straight to Setup1, not the (otherwise still-secret) Admin
+   Menu. adminRegReturnTo tracks which, matching the adminConfirmReturnTo
+   pattern already used elsewhere in this file. */
+var adminRegReturnTo=openAdminMenu;
+/* v1.4.31bd: cached count backing the Setup1 shortcut row above. Checked
+   once on app launch and once each time Setup1 is (re-)entered (see
+   maybeCheckPendingRegistrations(), called alongside the existing
+   maybeShowBackupReminder() at every one of those points) — not on every
+   Setup1 re-render, which would mean a backend call on every row move. */
+var setupPendingCount=0;
+var setupPendingCheckInFlight=false;
+function maybeCheckPendingRegistrations(){
+  var pw=loadAdminRegPassword();
+  if(!pw || setupPendingCheckInFlight) return;
+  setupPendingCheckInFlight=true;
+  backendPost({action:"adminList", password:pw}, function(res){
+    setupPendingCheckInFlight=false;
+    if(res && res.ok){
+      var newCount=(res.pending||[]).length;
+      if(newCount!==setupPendingCount){
+        setupPendingCount=newCount;
+        if(mode==="setup1") renderSetup();
+      }
+    }
+    /* A wrong/failed check deliberately does NOT clear the saved password
+       here — unlike fetchAdminRegLists() itself, a single quiet background
+       check failing (e.g. no network right now) isn't a strong enough
+       signal that the password is actually wrong; it just tries again
+       next time Setup1 is entered. */
+  });
+}
+function openAdminRegistrations(){
+  adminRegReturnTo=openAdminMenu;
+  var pw=loadAdminRegPassword();
+  if(!pw){ openKeyboard("adminpw","adminpw",""); return; }
+  adminRegPassword=pw;
+  fetchAdminRegLists();
+}
+/* Used to retry after an error without disturbing adminRegReturnTo, unlike
+   openAdminRegistrations() which always assumes entry via the Admin Menu. */
+function retryAdminRegistrations(){
+  var pw=loadAdminRegPassword();
+  if(!pw){ openKeyboard("adminpw","adminpw",""); return; }
+  adminRegPassword=pw;
+  fetchAdminRegLists();
+}
+function fetchAdminRegLists(){
+  adminRegLoading=true; adminRegError=""; adminRegTab=0; adminRegRow=0; adminRegConfirmingId=null;
+  showOverlay(); renderAdminRegistrations(); mode="admin_registrations";
+  backendPost({action:"adminList", password:adminRegPassword}, function(res){
+    adminRegLoading=false;
+    if(res && res.ok){
+      adminRegLists={pending:res.pending||[], approved:res.approved||[], rejected:res.rejected||[]};
+    } else if(res && res.error==="Not authorized."){
+      saveAdminRegPassword("");
+      adminRegError="Incorrect password.";
+    } else {
+      adminRegError=(res && res.error)?res.error:"Could not reach the backend.";
+    }
+    renderAdminRegistrations();
+  });
+}
+function doAdminRegAction(action){
+  var deviceId=adminRegConfirmingId;
+  adminRegLoading=true; adminRegConfirmingId=null; renderAdminRegistrations();
+  backendPost({action:action, password:adminRegPassword, deviceId:deviceId}, function(res){
+    if(!res || !res.ok){
+      adminRegLoading=false;
+      adminRegError=(res && res.error)?res.error:"Could not reach the backend.";
+      renderAdminRegistrations();
+      return;
+    }
+    fetchAdminRegLists(); /* refresh all three lists so counts/rows stay accurate */
+  });
+}
+function renderAdminRegistrations(){
+  var tabs=["PENDING","APPROVED","REJECTED"];
+  var keys=["pending","approved","rejected"];
+  var list=adminRegLists[keys[adminRegTab]];
+  var tabsHtml=tabs.map(function(t,i){
+    var count=adminRegLists[keys[i]].length;
+    return '<div style="padding:8px 18px;border-radius:10px;font-weight:700;font-size:13px;letter-spacing:1px;'+
+      (i===adminRegTab?'background:#4fc3f7;color:#0b0f19;':'background:#141b2d;color:#6c7590;')+'">'+t+' ('+count+')</div>';
+  }).join('');
+  var bodyHtml;
+  if(adminRegLoading){
+    bodyHtml='<div class="ov-sub" style="margin-top:30px;">Loading&hellip;</div>';
+  } else if(adminRegError){
+    bodyHtml='<div class="ov-sub" style="margin-top:30px;color:#ff5252;">'+adminRegError+'</div>'+
+      '<div class="ov-hint" style="margin-top:16px;">Center = try again &middot; Play/Pause = back</div>';
+  } else if(adminRegConfirmingId){
+    var d=list.filter(function(x){ return x.deviceId===adminRegConfirmingId; })[0];
+    bodyHtml='<div class="ov-title" style="color:#ff5252;font-size:20px;">'+(d?d.name:'')+'</div>'+
+      '<div class="ov-sub" style="margin-bottom:20px;">'+(d?d.contact+' &middot; '+d.label:'')+'</div>'+
+      '<div style="display:flex;gap:16px;">'+
+      '<div style="padding:10px 22px;border-radius:12px;border:2px solid '+(adminRegActionChoice===0?"#00e676":"#232c42")+';color:'+(adminRegActionChoice===0?"#00e676":"#8a91ab")+';font-weight:700;">Approve</div>'+
+      '<div style="padding:10px 22px;border-radius:12px;border:2px solid '+(adminRegActionChoice===1?"#ff5252":"#232c42")+';color:'+(adminRegActionChoice===1?"#ff5252":"#8a91ab")+';font-weight:700;">Reject</div>'+
+      '<div style="padding:10px 22px;border-radius:12px;border:2px solid '+(adminRegActionChoice===2?"#4fc3f7":"#232c42")+';color:'+(adminRegActionChoice===2?"#4fc3f7":"#8a91ab")+';font-weight:700;">Cancel</div>'+
+      '</div>'+
+      '<div class="ov-hint" style="margin-top:20px;">&#9664;&#9666; select &middot; Center confirm</div>';
+  } else if(list.length===0){
+    bodyHtml='<div class="stat-empty" style="margin-top:20px;">'+(adminRegTab===0?"No pending requests.":adminRegTab===1?"No approved devices yet.":"No rejected devices.")+'</div>'+
+      '<div class="row back-row active" style="margin-top:20px;width:200px;justify-content:center;"><div class="value">◀ Back</div></div>'+
+      '<div class="ov-hint" style="margin-top:14px;">Center select</div>';
+  } else {
+    var rowsHtml=list.map(function(d,i){
+      var active=(i===adminRegRow);
+      var sub=d.contact+' &middot; '+d.label+' &middot; '+d.date;
+      return '<div class="break-item" style="flex-direction:column;align-items:flex-start;'+(active?'border-color:#4fc3f7;':'')+'">'+
+        '<div style="font-weight:700;">'+d.name+'</div>'+
+        '<div style="font-size:12px;color:#6c7590;">'+sub+'</div>'+
+        '</div>';
+    }).join('')+
+      '<div class="row back-row'+(adminRegRow===list.length?' active':'')+'" style="margin-top:10px;justify-content:center;"><div class="value">◀ Back</div></div>';
+    bodyHtml='<div class="stat-card" style="width:460px;max-height:300px;overflow-y:auto;">'+rowsHtml+'</div>'+
+      '<div class="ov-hint" style="margin-top:14px;">'+(adminRegTab===0?"&#9650;&#9660; move &middot; Center: Approve/Reject &middot; &#9664;&#9666; switch tab":"&#9650;&#9660; move &middot; &#9664;&#9666; switch tab")+'</div>';
+  }
+  document.getElementById("overlay-screen").innerHTML=
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
+    '<div class="ov-title" style="color:#ff5252;margin-bottom:16px;">MANAGE REGISTRATIONS</div>'+
+    '<div style="display:flex;gap:10px;margin-bottom:16px;">'+tabsHtml+'</div>'+
+    bodyHtml+
+    '</div>';
 }
 
 /* ---- Shared confirm dialog, reused by every destructive action below ---- */
@@ -3159,7 +3316,7 @@ function removeFromPausedList(id){ var list=loadPausedMatches().filter(function(
 function clearActiveMatch(){ if(match.id) removeFromPausedList(match.id); }
 
 /* ================= SETUP RENDER ================= */
-function activeRowsPage1(){ var r=[]; if(hasPausedMatch()) r.push("resume"); r=r.concat(["player1","player2","continue"]); if(hiddenRoster.length>0) r.push("hiddenroster"); r=r.concat(["settings"]); return r; }
+function activeRowsPage1(){ var r=[]; if(hasPausedMatch()) r.push("resume"); r=r.concat(["player1","player2","continue"]); if(hiddenRoster.length>0) r.push("hiddenroster"); if(loadAdminRegPassword() && setupPendingCount>0) r.push("pendingrequests"); r=r.concat(["settings"]); return r; }
 function activeRowsPage2(){ var r=["format","scoringmode"]; if(FORMATS[state.formatIndex]==="Timed Match") r.push("duration"); if(FORMATS[state.formatIndex]==="Best of") r.push("bestof"); r.push("start"); r.push("back"); return r; }
 /* Self-Officiated (default) vs Refereed — see changeValue()'s "refmode" case
    and setActivePlayer() for the one behavioural difference this makes: a
@@ -3181,7 +3338,8 @@ var rowEls = {
   voicesel:document.getElementById("row-voicesel"), scoringmode:document.getElementById("row-scoringmode"),
   duration:document.getElementById("row-duration"), start:document.querySelector('[data-row="start"]'),
   settings:document.querySelector('[data-row="settings"]'),
-  hiddenroster:document.getElementById("row-hiddenroster"), bestof:document.getElementById("row-bestof")
+  hiddenroster:document.getElementById("row-hiddenroster"), bestof:document.getElementById("row-bestof"),
+  pendingrequests:document.getElementById("row-pendingrequests")
 };
 
 
@@ -3236,6 +3394,8 @@ function renderSetup(){
   }
   rowEls.hiddenroster.style.display=(state.page===1 && hiddenRoster.length>0)?"flex":"none";
   document.getElementById("v-hiddenroster").textContent="Hidden Players ("+hiddenRoster.length+")";
+  rowEls.pendingrequests.style.display=(state.page===1 && loadAdminRegPassword() && setupPendingCount>0)?"flex":"none";
+  document.getElementById("v-pendingrequests").textContent="Pending Requests ("+setupPendingCount+")";
   var pausedList=loadPausedMatches();
   rowEls.resume.style.display=(state.page===1 && pausedList.length>0)?"flex":"none";
   if(pausedList.length===1){
@@ -3410,6 +3570,7 @@ function activateSetupRow(){
   else if(key==="player1"){ if(state.p1Index===roster.length){ openKeyboard("player1","add"); } else { openPlayerOptionsMenu("player1"); } }
   else if(key==="player2"){ if(state.p2Index===roster.length){ openKeyboard("player2","add"); } else { openPlayerOptionsMenu("player2"); } }
   else if(key==="hiddenroster"){ openHiddenRosterView(); }
+  else if(key==="pendingrequests"){ adminRegReturnTo=returnToSetup1; adminRegPassword=loadAdminRegPassword(); fetchAdminRegLists(); }
   else if(key==="shootoutrules"){ openShootoutRules(); }
   else if(key==="start"){
     /* v1.4.31y: authorization gate — checked at the single point every
@@ -6142,7 +6303,7 @@ function confirmFrameComplete(){
    untouched. */
 var KB_ROWS_LETTERS=[["A","B","C","D","E","F","G"],["H","I","J","K","L","M","N"],["O","P","Q","R","S","T","U"],["V","W","X","Y","Z"],["SPACE","BACK","SAVE","CANCEL"]];
 var KB_ROWS_EMAIL=[["A","B","C","D","E","F","G"],["H","I","J","K","L","M","N"],["O","P","Q","R","S","T","U"],["V","W","X","Y","Z"],["0","1","2","3","4","5","6","7","8","9"],["@",".","-","_"],["BACK","SAVE","CANCEL"]];
-function currentKbRows(){ return (kbMode==="backupemail"||kbMode==="regcontact"||kbMode==="reglabel") ? KB_ROWS_EMAIL : KB_ROWS_LETTERS; }
+function currentKbRows(){ return (kbMode==="backupemail"||kbMode==="regcontact"||kbMode==="reglabel"||kbMode==="adminpw") ? KB_ROWS_EMAIL : KB_ROWS_LETTERS; }
 var kbCursor={row:0,col:0}, kbTarget=null, kbText="", kbMode="add", kbError="";
 function openKeyboard(t, kbModeArg, prefill){ kbTarget=t; kbMode=kbModeArg||"add"; kbText=prefill||""; kbError=""; kbCursor={row:0,col:0}; renderKeyboard(); document.getElementById("kb-overlay").classList.add("open"); }
 /* v1.4.26: if the "Add New Player" sentinel (index===roster.length) is
@@ -6156,7 +6317,7 @@ function revertRosterSentinels(){
 }
 function closeKeyboard(){ document.getElementById("kb-overlay").classList.remove("open"); kbTarget=null; kbError=""; }
 function renderKeyboard(){
-  document.getElementById("kb-title").textContent = kbMode==="rename" ? "Rename Player" : kbMode==="backupemail" ? "Backup Email Address" : kbMode==="regname" ? "Your Name" : kbMode==="regcontact" ? "Email or Phone" : kbMode==="reglabel" ? "Name This Device" : "Enter Player Name";
+  document.getElementById("kb-title").textContent = kbMode==="rename" ? "Rename Player" : kbMode==="backupemail" ? "Backup Email Address" : kbMode==="regname" ? "Your Name" : kbMode==="regcontact" ? "Email or Phone" : kbMode==="reglabel" ? "Name This Device" : kbMode==="adminpw" ? "Admin Password" : "Enter Player Name";
   /* v1.4.31aw: registration steps get explanatory context, per direct
      feedback that there was previously no indication of why this
      information was being asked for at all — every other keyboard use
@@ -6165,7 +6326,8 @@ function renderKeyboard(){
   var kbSubtitleEl=document.getElementById("kb-subtitle");
   var kbSubtitleText = kbMode==="regname" ? "This device needs approval before backup and restore will work. Enter your name so the owner knows who's asking." :
     kbMode==="regcontact" ? "How can the owner reach you if they have a question about this request?" :
-    kbMode==="reglabel" ? "Give this device a short name (e.g. \u201cTable 1\u201d) so it's easy to identify later." : "";
+    kbMode==="reglabel" ? "Give this device a short name (e.g. \u201cTable 1\u201d) so it's easy to identify later." :
+    kbMode==="adminpw" ? "Enter the backend admin password. This device will remember it, so you won't need to enter it again unless it's changed." : "";
   kbSubtitleEl.textContent = kbSubtitleText;
   kbSubtitleEl.style.display = kbSubtitleText ? "block" : "none";
   document.getElementById("kb-text").textContent=kbText;
@@ -6211,6 +6373,20 @@ function kbPress(){
       submitDeviceRegistration();
       return;
     }
+    /* v1.4.31bc: password is saved optimistically (matching the same
+       "save first, handle failure after" pattern already used by device
+       registration above) — if it's actually wrong, fetchAdminRegLists()
+       clears it again and shows "Incorrect password." on the list screen
+       itself rather than blocking here with an extra network round-trip. */
+    if(kbMode==="adminpw"){
+      var pw=kbText.trim();
+      if(pw.length===0){ kbError="Please enter the admin password."; renderKeyboard(); return; }
+      saveAdminRegPassword(pw);
+      adminRegPassword=pw;
+      closeKeyboard();
+      fetchAdminRegLists();
+      return;
+    }
     /* v1.4.28: Backup Email is a distinct kbMode — unlike a player name, an
        empty value is a valid, intentional choice here (clears the address),
        and this keyboard was opened from the Settings menu, not Setup, so it
@@ -6253,6 +6429,7 @@ function kbPress(){
        app launch rather than being lost forever or nagging again this
        session. */
     if(kbMode==="regname"||kbMode==="regcontact"||kbMode==="reglabel"){ registrationDraft={name:"",contact:"",label:""}; closeKeyboard(); renderSetup(); return; }
+    if(kbMode==="adminpw"){ closeKeyboard(); adminRegReturnTo(); return; }
     revertRosterSentinels(); closeKeyboard(); return;
   }
   else { kbText+=cell; kbError=""; }
@@ -6581,6 +6758,30 @@ function onKeyTap(code){
   if(mode==="admin_confirm"){
     if(code===13){ activateAdminConfirm(); }
     else if(code===179){ adminConfirmReturnTo(); }
+    return;
+  }
+  if(mode==="admin_registrations"){
+    if(adminRegConfirmingId){
+      if(code===13){
+        if(adminRegActionChoice===0) doAdminRegAction("adminApprove");
+        else if(adminRegActionChoice===1) doAdminRegAction("adminReject");
+        else { adminRegConfirmingId=null; renderAdminRegistrations(); }
+      }
+      else if(code===179){ adminRegConfirmingId=null; renderAdminRegistrations(); }
+      return;
+    }
+    if(adminRegError){
+      if(code===13){ retryAdminRegistrations(); }
+      else if(code===179){ adminRegReturnTo(); }
+      return;
+    }
+    if(adminRegLoading){ return; }
+    var regList=adminRegLists[["pending","approved","rejected"][adminRegTab]];
+    if(code===13){
+      if(adminRegRow===regList.length){ adminRegReturnTo(); return; }
+      if(adminRegTab===0){ adminRegConfirmingId=regList[adminRegRow].deviceId; adminRegActionChoice=2; renderAdminRegistrations(); }
+    }
+    else if(code===179){ adminRegReturnTo(); }
     return;
   }
   if(mode==="admin_delete_filter_player"){
@@ -7101,6 +7302,21 @@ function handleNavKeydown(code, kbOpen){
     if(code===37||code===39){ adminConfirmChoice = adminConfirmChoice===0?1:0; renderAdminConfirm(); }
     return;
   }
+  if(mode==="admin_registrations"){
+    if(adminRegConfirmingId){
+      if(code===37){ adminRegActionChoice=(adminRegActionChoice-1+3)%3; renderAdminRegistrations(); }
+      else if(code===39){ adminRegActionChoice=(adminRegActionChoice+1)%3; renderAdminRegistrations(); }
+      return;
+    }
+    if(adminRegError||adminRegLoading){ return; }
+    var regList2=adminRegLists[["pending","approved","rejected"][adminRegTab]];
+    var regRowCount=regList2.length+1; /* +1 for the Back row */
+    if(code===37){ adminRegTab=(adminRegTab+2)%3; adminRegRow=0; renderAdminRegistrations(); }
+    else if(code===39){ adminRegTab=(adminRegTab+1)%3; adminRegRow=0; renderAdminRegistrations(); }
+    else if(code===38){ adminRegRow=(adminRegRow-1+regRowCount)%regRowCount; renderAdminRegistrations(); }
+    else if(code===40){ adminRegRow=(adminRegRow+1)%regRowCount; renderAdminRegistrations(); }
+    return;
+  }
   if(mode==="admin_delete_filter_player"){
     if(roster.length>0 && (code===37||code===39)){
       adminFilterPlayerIndex=(adminFilterPlayerIndex+(code===39?1:-1)+roster.length)%roster.length;
@@ -7160,7 +7376,7 @@ applyButtonInfoVisibility();
    there's no rush — 10 matches' worth of buffer before lockout. */
 if(shouldShowWhatsNew()){ openWhatsNew(); }
 else if(!getDeviceAuthState().registered){ startDeviceRegistration(); }
-else { maybeShowBackupReminder(); }
+else { maybeShowBackupReminder(); maybeCheckPendingRegistrations(); }
 })();
 </script>
 </body>
