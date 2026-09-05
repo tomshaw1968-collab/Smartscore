@@ -151,16 +151,17 @@
   #footer-hint { margin-top:14px; font-size:15px; color:#4a5170; letter-spacing:.5px; }
   #footer-hint b { color:#7a8299; }
   #version-tag { position:fixed; bottom:10px; left:16px; font-size:12px; color:#8a91ab; letter-spacing:.5px; z-index:9999; background:rgba(15,20,32,0.55); padding:2px 8px; border-radius:6px; pointer-events:none; }
-  #kb-overlay { position:absolute; inset:0; background:rgba(7,10,17,.94); display:none; align-items:center; justify-content:center; flex-direction:column; }
+  #kb-overlay { position:absolute; inset:0; background:rgba(7,10,17,.94); display:none; align-items:center; justify-content:center; flex-direction:column; overflow-y:auto; padding:10px 0; box-sizing:border-box; }
   #kb-overlay.open { display:flex; }
-  #kb-title { font-size:20px; color:#6c7590; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:14px; }
-  #kb-preview { font-size:44px; font-weight:700; color:#00e676; min-height:60px; margin-bottom:26px; letter-spacing:2px; }
+  #kb-title { font-size:clamp(15px, 2.5vh, 20px); color:#6c7590; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:clamp(6px, 1.5vh, 14px); }
+  #kb-subtitle { font-size:clamp(11px, 1.8vh, 14px); color:#8a91ab; max-width:480px; text-align:center; margin:-4px 0 clamp(6px, 1.5vh, 14px); line-height:1.4; }
+  #kb-preview { font-size:clamp(26px, 5vh, 44px); font-weight:700; color:#00e676; min-height:clamp(36px, 7vh, 60px); margin-bottom:clamp(10px, 2.5vh, 26px); letter-spacing:2px; }
   #kb-preview .cursor { display:inline-block; width:4px; height:40px; background:#00e676; margin-left:4px; vertical-align:middle; animation:blink 1s step-end infinite; }
   #kb-error { font-size:13px; color:#ff8a80; min-height:16px; margin:-18px 0 14px; }
   @keyframes blink { 50%{opacity:0;} }
-  #kb-grid { display:flex; flex-direction:column; gap:10px; }
-  .kb-row { display:flex; gap:10px; justify-content:center; }
-  .kb-cell { min-width:56px; height:56px; background:#141b2d; border:2px solid #232c42; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:22px; font-weight:600; color:#b8bfd1; padding:0 14px; }
+  #kb-grid { display:flex; flex-direction:column; gap:clamp(4px, 1.2vh, 10px); }
+  .kb-row { display:flex; gap:clamp(4px, 1.2vh, 10px); justify-content:center; }
+  .kb-cell { min-width:56px; height:clamp(36px, 7vh, 56px); background:#141b2d; border:2px solid #232c42; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:clamp(15px, 3vh, 22px); font-weight:600; color:#b8bfd1; padding:0 14px; }
   .kb-cell.wide { min-width:140px; font-size:16px; letter-spacing:1px; }
   .kb-cell.focus { border-color:#00e676; background:#16233a; color:#00e676; }
   .kb-cell.action-save.focus { border-color:#00e676; color:#00e676; }
@@ -625,6 +626,7 @@
 
 <div id="kb-overlay">
   <div id="kb-title">Enter Player Name</div>
+  <div id="kb-subtitle" style="display:none;"></div>
   <div id="kb-preview"><span id="kb-text"></span><span class="cursor"></span></div>
   <div id="kb-error"></div>
   <div id="kb-grid"></div>
@@ -643,7 +645,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31av";
+var APP_VERSION = "1.4.31ax";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -658,7 +660,7 @@ var APP_VERSION = "1.4.31av";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
-  { version:"1.4.31av", date:"2026-09-01", notes:[
+  { version:"1.4.31ax", date:"2026-09-01", notes:[
     "Consolidated catch-up entry: this in-app What's New list hadn't had an entry added since v1.4.24, despite five full version rounds since then — this one summarizes everything from v1.4.25 through today in user-facing terms; see the technical blueprint for full detail on any of it.",
     "New: two additional Scoring Modes alongside the existing full ball-by-ball scoring — Easy Mode (a single break counter, pick who scored, no ball-by-ball tracking) and Vintage Mode (a wood-and-brass sliding-rail scoreboard look). Choose via Settings > Scoring Mode. Shootout always uses full scoring regardless of this setting.",
     "New: a Settings menu on the main Setup screen, consolidating Voice, Breaks Board, Backup/Restore, Backup Email, and a new Hints screen in one place.",
@@ -2799,7 +2801,16 @@ function resetSetupIdleTimer(){
   }
 }
 function startScreensaver(){
-  if(mode!=="setup1") return; /* safety check in case something changed mode without going through resetSetupIdleTimer() again */
+  /* v1.4.31aw BUG FIX: mode never actually leaves "setup1" while the
+     keyboard overlay is open — it's a separate layered overlay, not a
+     mode change — so this check alone didn't catch "keyboard is open on
+     top of Setup1 right now". Confirmed on-device: the screensaver could
+     activate itself underneath an open keyboard (e.g. during registration
+     name entry, which easily takes longer than the 10s idle window,
+     since nothing about typing resets the idle timer either — see the
+     matching fix in the keydown listener), showing faintly through the
+     keyboard's own not-fully-opaque background on every cycle update. */
+  if(mode!=="setup1" || document.getElementById("kb-overlay").classList.contains("open")) return;
   screensaverViewIndex=0;
   showOverlay();
   renderScreensaver();
@@ -2809,6 +2820,7 @@ function startScreensaver(){
 function scheduleScreensaverCycle(){
   if(screensaverCycleTimer){ clearTimeout(screensaverCycleTimer); }
   screensaverCycleTimer=setTimeout(function(){
+    if(document.getElementById("kb-overlay").classList.contains("open")){ scheduleScreensaverCycle(); return; } /* same guard, ongoing cycle */
     var p1=roster[state.p1Index], p2=roster[state.p2Index];
     var views=availableTopBreaksViews(p1,p2);
     screensaverViewIndex=(screensaverViewIndex+1)%views.length;
@@ -6125,6 +6137,17 @@ function revertRosterSentinels(){
 function closeKeyboard(){ document.getElementById("kb-overlay").classList.remove("open"); kbTarget=null; kbError=""; }
 function renderKeyboard(){
   document.getElementById("kb-title").textContent = kbMode==="rename" ? "Rename Player" : kbMode==="backupemail" ? "Backup Email Address" : kbMode==="regname" ? "Your Name" : kbMode==="regcontact" ? "Email or Phone" : kbMode==="reglabel" ? "Name This Device" : "Enter Player Name";
+  /* v1.4.31aw: registration steps get explanatory context, per direct
+     feedback that there was previously no indication of why this
+     information was being asked for at all — every other keyboard use
+     (player names, backup email) is self-explanatory from its title
+     alone, so the subtitle stays hidden for those. */
+  var kbSubtitleEl=document.getElementById("kb-subtitle");
+  var kbSubtitleText = kbMode==="regname" ? "This device needs approval before backup and restore will work. Enter your name so the owner knows who's asking." :
+    kbMode==="regcontact" ? "How can the owner reach you if they have a question about this request?" :
+    kbMode==="reglabel" ? "Give this device a short name (e.g. \u201cTable 1\u201d) so it's easy to identify later." : "";
+  kbSubtitleEl.textContent = kbSubtitleText;
+  kbSubtitleEl.style.display = kbSubtitleText ? "block" : "none";
   document.getElementById("kb-text").textContent=kbText;
   document.getElementById("kb-error").textContent=kbError;
   var grid=document.getElementById("kb-grid"); grid.innerHTML="";
