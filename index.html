@@ -671,7 +671,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bk";
+var APP_VERSION = "1.4.31bl";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -686,6 +686,9 @@ var APP_VERSION = "1.4.31bk";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bl", date:"2026-09-28", notes:[
+    "Fix: the secret Admin Menu (hold Rewind + Fast-Forward on the first Setup page) stopped opening if you'd gone on to the second Setup page or Playing History and then come back, until the app was relaunched. The same bug also stopped the idle screensaver from starting after that."
+  ]},
   { version:"1.4.31bk", date:"2026-09-28", notes:[
     "New: Admin Menu > Edit a Match Score — correct the final frames score of a saved match (pick a player, pick the match, adjust and save). Only the final score changes, not individual frame scores; the match is marked EDITED on its scorecard, showing the original score."
   ]},
@@ -3740,7 +3743,17 @@ function activateSetupRow(){
     if(state.rowIndex<0) state.rowIndex=0;
     renderSetup();
   }
-  else if(key==="back"){ state.page=1; state.rowIndex=0; renderSetup(); }
+  else if(key==="back"){
+    /* v1.4.31bl BUG FIX: this set state.page=1 but left `mode` alone. Reaching
+       page 2 via returnToSetup2() (e.g. Playing History's Back) sets
+       mode="setup2", so Back from here landed on page 1 still in mode
+       "setup2" — and everything that requires mode==="setup1" on page 1
+       (the secret Admin Menu chord, the 10s idle screensaver, the pending-
+       requests refresh) silently stopped working until the app was
+       relaunched. Reported: secret menu dead after going past the main
+       setup page and back. */
+    mode="setup1"; state.page=1; state.rowIndex=0; renderSetup();
+  }
   else if(key==="player1"){ if(state.p1Index===roster.length){ openKeyboard("player1","add"); } else { openPlayerOptionsMenu("player1"); } }
   else if(key==="player2"){ if(state.p2Index===roster.length){ openKeyboard("player2","add"); } else { openPlayerOptionsMenu("player2"); } }
   else if(key==="hiddenroster"){ openHiddenRosterView(); }
@@ -6992,7 +7005,7 @@ document.addEventListener("keydown", function(e){
      arrives later), checking the OTHER one's .down catches the "both
      currently held" moment correctly regardless of which one was
      physically pressed first. */
-  if((code===227||code===228) && mode==="setup1" && state.page===1){
+  if((code===227||code===228) && (mode==="setup1"||mode==="setup2") && state.page===1){
     var otherCode = code===227 ? 228 : 227;
     if(ks(otherCode).down){ openAdminMenu(); e.preventDefault(); return; }
   }
