@@ -671,7 +671,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bj";
+var APP_VERSION = "1.4.31bk";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -686,6 +686,9 @@ var APP_VERSION = "1.4.31bj";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bk", date:"2026-09-28", notes:[
+    "New: Admin Menu > Edit a Match Score — correct the final frames score of a saved match (pick a player, pick the match, adjust and save). Only the final score changes, not individual frame scores; the match is marked EDITED on its scorecard, showing the original score."
+  ]},
   { version:"1.4.31bj", date:"2026-09-26", notes:[
     "Fix: break order now alternates every frame. It was using a \"loser breaks next frame\" rule, so whoever kept losing kept breaking.",
     "Change: the frame-start screen now shows who's breaking in large type.",
@@ -2268,6 +2271,9 @@ function renderMatchScorecard(){
     : (m.wasAbandoned ? ' <span style="font-size:13px;font-weight:700;letter-spacing:1px;color:#ff8a80;vertical-align:middle;">&middot; ABANDONED</span>'
     : (m.decidedOnBlue ? ' <span style="font-size:13px;font-weight:700;letter-spacing:1px;color:#2979ff;vertical-align:middle;">&middot; DECIDED ON BLUE</span>'
     : (m.isDraw ? ' <span style="font-size:13px;font-weight:700;letter-spacing:1px;color:#4fc3f7;vertical-align:middle;">&middot; DRAW</span>' : '')));
+  if(m.scoreEdited && m.originalScore1!==undefined){
+    statusBadge += ' <span style="font-size:13px;font-weight:700;letter-spacing:1px;color:#ffa726;vertical-align:middle;">&middot; EDITED (was '+m.originalScore1+'-'+m.originalScore2+')</span>';
+  }
   var totalLabel = m.incomplete ? 'So Far' : 'Total';
   document.getElementById("overlay-screen").innerHTML =
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:0 30px;">'+
@@ -2578,7 +2584,7 @@ function openHintsScreen(){ showOverlay(); renderHintsScreen(); mode="hints_scre
    its selection to Cancel — reaching Delete requires an explicit
    Left/Right move first, not just a stray Center press.
    ============================================================ */
-var ADMIN_MENU=["Delete a Match","Remove Matches by Player","Remove Matches Before Date","Wipe All Match History","Manage Registrations","Back"];
+var ADMIN_MENU=["Delete a Match","Edit a Match Score","Remove Matches by Player","Remove Matches Before Date","Wipe All Match History","Manage Registrations","Back"];
 var adminMenuRow=0;
 function openAdminMenu(){ adminMenuRow=0; showOverlay(); renderAdminMenu(); mode="admin_menu"; }
 function renderAdminMenu(){
@@ -2592,6 +2598,7 @@ function renderAdminMenu(){
 function activateAdminMenuRow(){
   var choice=ADMIN_MENU[adminMenuRow];
   if(choice==="Delete a Match") openAdminDeleteMatchPicker();
+  else if(choice==="Edit a Match Score") openAdminEditMatchPicker();
   else if(choice==="Remove Matches by Player") openAdminPlayerPicker();
   else if(choice==="Remove Matches Before Date") openAdminDatePicker();
   else if(choice==="Wipe All Match History") openAdminWipeAllConfirm();
@@ -2895,6 +2902,137 @@ function confirmDeleteSingleMatch(){
        picker each time. */
     openAdminDeleteFilteredList();
   }, openAdminDeleteFilteredList);
+}
+
+/* ---- v1.4.31bk: Edit a Match Score — corrects the FINAL frames score of a
+   saved match (e.g. 3-2 entered as 2-3). Scope is deliberately just that,
+   per direct request: individual frame scores, per-frame winners and
+   breaks are NOT touched, so an edited match's per-frame rows on its
+   scorecard can disagree with its corrected total — the scorecard flags
+   this with an EDITED badge rather than hiding it. The original score is
+   kept on the record (originalScore1/2) the first time a match is edited,
+   so a change is never a silent overwrite. Same player-then-list browsing
+   as Delete a Match, but its own modes and state so that destructive flow
+   is untouched. Winner/record/head-to-head/Player Stats all derive from
+   score1/score2 (and isDraw for a tie), so they follow the edit
+   automatically; isDraw is recomputed on save for that reason. ---- */
+var adminEditFilterIndex=0;
+var adminEditMatchList=[];
+var adminEditMatchIndex=0;
+var adminEditTarget=null;
+var adminEditS1=0, adminEditS2=0, adminEditRow=0;
+function openAdminEditMatchPicker(){
+  adminEditFilterIndex=0;
+  renderAdminEditFilterPlayer();
+  mode="admin_edit_filter_player";
+}
+function renderAdminEditFilterPlayer(){
+  if(roster.length===0){
+    document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#ffa726;">EDIT A MATCH SCORE</div><div class="ov-sub">No players in the roster.</div><div class="ov-hint" style="margin-top:16px;">Center or Play/Pause = back</div></div>';
+    return;
+  }
+  var name=roster[adminEditFilterIndex];
+  var count=loadMatches().filter(function(m){ return m.p1===name || m.p2===name; }).length;
+  document.getElementById("overlay-screen").innerHTML=
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
+    '<div class="ov-title" style="color:#ffa726;">EDIT A MATCH SCORE</div>'+
+    '<div class="ov-sub" style="margin-top:8px;">Find a match by player</div>'+
+    '<div class="row active" style="width:280px;margin:20px 0 8px;justify-content:center;"><div class="chev">◀</div><div class="value" style="flex:0 1 auto;padding:0 16px;">'+name+'</div><div class="chev">▶</div></div>'+
+    '<div style="font-size:14px;color:#8a91ab;margin-bottom:20px;">'+count+' match'+(count===1?'':'es')+' on record</div>'+
+    '<div class="ov-hint">&#9664;&#9666; choose player &middot; Center = view their matches &middot; Play/Pause = back</div>'+
+    '</div>';
+}
+function openAdminEditFilteredList(){
+  var name=roster[adminEditFilterIndex];
+  if(!name) return;
+  adminEditMatchList = loadMatches()
+    .map(function(m,idx){ return {m:m, idx:idx}; })
+    .filter(function(entry){ return entry.m.p1===name || entry.m.p2===name; })
+    .sort(function(a,b){ return new Date(b.m.date)-new Date(a.m.date); });
+  adminEditMatchIndex=0;
+  renderAdminEditFilteredList();
+  mode="admin_edit_filtered_list";
+}
+function renderAdminEditFilteredList(){
+  var name=roster[adminEditFilterIndex];
+  if(adminEditMatchList.length===0){
+    document.getElementById("overlay-screen").innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;"><div class="ov-title" style="color:#ffa726;">'+name+'\u2019S MATCHES</div><div class="ov-sub">No matches found.</div><div class="ov-hint" style="margin-top:16px;">Play/Pause = back</div></div>';
+    return;
+  }
+  var headerRow='<div class="mr-row mr-header"><span class="mr-date">Date</span><span class="mr-score" style="flex:2;">Match</span></div>';
+  var rows=adminEditMatchList.map(function(entry,i){
+    var m=entry.m;
+    var activeCls = i===adminEditMatchIndex ? ' active' : '';
+    var editedTag = m.scoreEdited ? ' <span class="mr-tag mr-tag-inc">EDITED</span>' : '';
+    return '<div class="mr-row selectable'+activeCls+'"><span class="mr-date">'+formatDateWithYear(m.date)+'</span><span class="mr-score" style="flex:2;">'+m.p1+' '+m.score1+'-'+m.score2+' '+m.p2+editedTag+'</span></div>';
+  }).join("");
+  document.getElementById("overlay-screen").innerHTML=
+    '<div style="display:flex;flex-direction:column;align-items:center;height:100%;padding:20px 30px;">'+
+    '<div class="ov-title" style="color:#ffa726;">'+name+'\u2019S MATCHES</div>'+
+    '<div class="stat-card" style="width:560px;margin-top:16px;"><div id="admin-edit-list" class="scroll-cue-wrap" style="max-height:280px;overflow:auto;">'+headerRow+rows+'</div></div>'+
+    '<div class="ov-hint" style="margin-top:16px;">&#9650;&#9660; browse &middot; Center = edit this match\u2019s score &middot; Play/Pause = back</div>'+
+    '</div>';
+  var activeItem=document.querySelector("#admin-edit-list .mr-row.active");
+  scrollElementIntoViewWithin(document.getElementById("admin-edit-list"), activeItem);
+  updateScrollCueById("admin-edit-list");
+}
+function openAdminEditScores(){
+  if(adminEditMatchList.length===0) return;
+  adminEditTarget=adminEditMatchList[adminEditMatchIndex];
+  adminEditS1=adminEditTarget.m.score1;
+  adminEditS2=adminEditTarget.m.score2;
+  adminEditRow=0;
+  renderAdminEditScores();
+  mode="admin_edit_scores";
+}
+function renderAdminEditScores(){
+  var m=adminEditTarget.m;
+  var changed=(adminEditS1!==m.score1 || adminEditS2!==m.score2);
+  var wasLine = changed
+    ? '<div style="font-size:14px;color:#ffa726;margin-bottom:14px;">Was '+m.score1+'-'+m.score2+' &rarr; now '+adminEditS1+'-'+adminEditS2+'</div>'
+    : '<div style="font-size:14px;color:#8a91ab;margin-bottom:14px;">Currently '+m.score1+'-'+m.score2+'</div>';
+  var html='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
+    '<div class="ov-title" style="color:#ffa726;">EDIT MATCH SCORE</div>'+
+    '<div class="ov-sub" style="margin-bottom:6px;">'+m.p1+' vs '+m.p2+' &middot; '+formatDateWithYear(m.date)+'</div>'+
+    wasLine+
+    '<div class="ov-menu">'+
+    '<div class="row'+(adminEditRow===0?' active':'')+'"><div class="label">'+m.p1+'</div><div class="chev">◀</div><div class="value">'+adminEditS1+'</div><div class="chev">▶</div></div>'+
+    '<div class="row'+(adminEditRow===1?' active':'')+'"><div class="label">'+m.p2+'</div><div class="chev">◀</div><div class="value">'+adminEditS2+'</div><div class="chev">▶</div></div>'+
+    '<div class="row action-row'+(adminEditRow===2?' active':'')+'"><div class="label"></div><div class="value">Save</div><div class="chev"></div></div>'+
+    '<div class="row back-row'+(adminEditRow===3?' active':'')+'"><div class="label"></div><div class="value">Cancel</div><div class="chev"></div></div>'+
+    '</div>'+
+    '<div style="font-size:12px;color:#6c7590;margin-top:12px;max-width:440px;text-align:center;">Final frames score only &mdash; individual frame scores are not changed.</div>'+
+    '<div class="ov-hint" style="margin-top:8px;">&#9650;&#9660; move &middot; &#9664;&#9666; change &middot; Center on Save = save &middot; Play/Pause = cancel</div>'+
+    '</div>';
+  document.getElementById("overlay-screen").innerHTML=html;
+}
+function backToAdminEditList(){
+  renderAdminEditFilteredList();
+  mode="admin_edit_filtered_list";
+}
+function saveAdminEditedScore(){
+  var t=adminEditTarget.m;
+  if(adminEditS1!==t.score1 || adminEditS2!==t.score2){
+    var all=loadMatches();
+    var i=-1;
+    for(var k=0;k<all.length;k++){
+      var x=all[k];
+      if(x.date===t.date && x.p1===t.p1 && x.p2===t.p2 && x.score1===t.score1 && x.score2===t.score2){ i=k; break; }
+    }
+    if(i>-1){
+      var rec=all[i];
+      if(rec.originalScore1===undefined){ rec.originalScore1=rec.score1; rec.originalScore2=rec.score2; }
+      rec.score1=adminEditS1; rec.score2=adminEditS2;
+      rec.isDraw=(adminEditS1===adminEditS2);
+      rec.scoreEdited=true;
+      saveMatches(all);
+    }
+  }
+  /* back to the same player's list, refreshed, on the same row */
+  var keep=adminEditMatchIndex;
+  openAdminEditFilteredList();
+  adminEditMatchIndex=Math.min(keep, Math.max(0,adminEditMatchList.length-1));
+  renderAdminEditFilteredList();
 }
 
 /* ---- Flow B: remove every match involving one chosen player ---- */
@@ -7076,6 +7214,24 @@ function onKeyTap(code){
     else if(code===179){ openAdminDeleteMatchPicker(); }
     return;
   }
+  if(mode==="admin_edit_filter_player"){
+    if(code===13){ openAdminEditFilteredList(); }
+    else if(code===179){ openAdminMenu(); }
+    return;
+  }
+  if(mode==="admin_edit_filtered_list"){
+    if(code===13){ openAdminEditScores(); }
+    else if(code===179){ openAdminEditMatchPicker(); }
+    return;
+  }
+  if(mode==="admin_edit_scores"){
+    if(code===13){
+      if(adminEditRow===2) saveAdminEditedScore();
+      else if(adminEditRow===3) backToAdminEditList();
+    }
+    else if(code===179){ backToAdminEditList(); }
+    return;
+  }
   if(mode==="admin_player_picker"){
     if(code===13){ confirmRemoveByPlayer(); }
     else if(code===179){ openAdminMenu(); }
@@ -7652,6 +7808,31 @@ function handleNavKeydown(code, kbOpen){
       adminDeleteMatchIndex=(adminDeleteMatchIndex+(code===40?1:-1)+adminDeleteMatchList.length)%adminDeleteMatchList.length;
       renderAdminDeleteFilteredList();
     }
+    return;
+  }
+  if(mode==="admin_edit_filter_player"){
+    if(roster.length>0 && (code===37||code===39)){
+      adminEditFilterIndex=(adminEditFilterIndex+(code===39?1:-1)+roster.length)%roster.length;
+      renderAdminEditFilterPlayer();
+    }
+    return;
+  }
+  if(mode==="admin_edit_filtered_list"){
+    if(adminEditMatchList.length>0 && (code===38||code===40)){
+      adminEditMatchIndex=(adminEditMatchIndex+(code===40?1:-1)+adminEditMatchList.length)%adminEditMatchList.length;
+      renderAdminEditFilteredList();
+    }
+    return;
+  }
+  if(mode==="admin_edit_scores"){
+    if(code===38) adminEditRow=(adminEditRow+3)%4;
+    else if(code===40) adminEditRow=(adminEditRow+1)%4;
+    else if(code===37||code===39){
+      var ed=code===39?1:-1;
+      if(adminEditRow===0) adminEditS1=Math.max(0,Math.min(99,adminEditS1+ed));
+      else if(adminEditRow===1) adminEditS2=Math.max(0,Math.min(99,adminEditS2+ed));
+    }
+    renderAdminEditScores();
     return;
   }
   if(mode==="admin_player_picker"){
