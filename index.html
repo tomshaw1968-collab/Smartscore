@@ -42,6 +42,12 @@
   .mr-row.selectable.active .chev { visibility:visible; }
   .mr-row.selectable.active .mr-date, .mr-row.selectable.active .mr-score, .mr-row.selectable.active .mr-breaks { color:#00e676; }
   .mr-row.selectable.active .mr-score .winner { color:#00e676; }
+  .mr-compact .mr-row { padding-top:4px; padding-bottom:4px; }
+  .mr-compact .mr-row.selectable { padding:4px 8px; }
+  .mr-compact .mr-row.mr-header { padding-bottom:4px; }
+  .mr-compact h2 { margin-bottom:0; }
+  .mr-compact .h2h-line { margin-bottom:4px; }
+  .mr-compact .h2h-line:last-of-type { margin-bottom:6px; }
   #toss-row { border-radius:8px; padding:8px; margin-top:6px; }
   #toss-row.active { background:#16233a; }
   .sc-row { display:flex; padding:7px 4px; font-size:14px; color:#b8bfd1; border-bottom:1px solid #1c2438; }
@@ -665,7 +671,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bi";
+var APP_VERSION = "1.4.31bj";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -680,6 +686,11 @@ var APP_VERSION = "1.4.31bi";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bj", date:"2026-09-26", notes:[
+    "Fix: break order now alternates every frame. It was using a \"loser breaks next frame\" rule, so whoever kept losing kept breaking.",
+    "Change: the frame-start screen now shows who's breaking in large type.",
+    "Change: Playing History now always shows the last 5 matches, drops the match-format line, and uses a tighter layout so Continue and Back stay on screen."
+  ]},
   { version:"1.4.31bi", date:"2026-09-26", notes:[
     "New: the \"Press Center to start the frame\" screen between frames now shows who's due to break."
   ]},
@@ -3752,7 +3763,7 @@ function goMatchReady(){
   match.config=config;
   var full = buildUnifiedMatchList(config.player1, config.player2);
   mreadyRecentList=[];
-  for(var i=full.length-1; i>=Math.max(0,full.length-3); i--){ mreadyRecentList.push({match:full[i], fullIndex:i}); }
+  for(var i=full.length-1; i>=Math.max(0,full.length-5); i--){ mreadyRecentList.push({match:full[i], fullIndex:i}); }
   reviewShowingStats=false;
   showOverlay();
   /* v1.4.31ao BUG FIX: this used to assume Continue was always the LAST
@@ -3805,11 +3816,11 @@ function renderMatchReview(){
     (h2hText?'<div class="h2h-line">'+h2hText+'</div>':'');
   function recordLabel(r){ return r.played>0 ? (r.wins+'W'+(r.draws?'-'+r.draws+'D':'')+'-'+r.losses+'L') : '&mdash;'; }
   var namesHeaderHtml =
-    '<div style="display:flex;align-items:center;justify-content:center;gap:22px;margin-bottom:8px;">'+
-      '<div style="text-align:center;"><div style="font-size:30px;font-weight:700;color:#e8ecf4;">'+config.player1+'</div>'+
+    '<div style="display:flex;align-items:center;justify-content:center;gap:22px;margin-bottom:4px;">'+
+      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player1+'</div>'+
         '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP1)+'</div></div>'+
       '<div style="font-size:18px;color:#6c7590;">vs</div>'+
-      '<div style="text-align:center;"><div style="font-size:30px;font-weight:700;color:#e8ecf4;">'+config.player2+'</div>'+
+      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player2+'</div>'+
         '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP2)+'</div></div>'+
     '</div>';
   var isShootoutMatch = config.format==="Shootout";
@@ -3830,13 +3841,12 @@ function renderMatchReview(){
      instead of treating them as two separate Up/Down stops. */
   var reviewHint = (onContinueOrBackRow ? '&#9664;&#9666; select &middot; Center confirm' : '&#9650;&#9660; move &middot; Center select') + ' &middot; Rewind/Fast-Forward = Player Stats';
   document.getElementById("overlay-screen").innerHTML =
-    '<div id="match-review-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:4px;padding-bottom:4px;overflow-y:auto;">'+
-    '<div style="font-size:13px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Playing History</div>'+
+    '<div id="match-review-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:2px;padding-bottom:2px;overflow-y:auto;">'+
+    '<div style="font-size:12px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;">Playing History</div>'+
     namesHeaderHtml+
-    '<div style="font-size:17px;color:#4fc3f7;margin-bottom:14px;">'+formatShortLabel(config.format)+(config.duration?' — '+config.duration+' min':'')+(config.shootoutFrameTimeLimitSec?' — '+formatElapsed(config.shootoutFrameTimeLimitSec*1000):'')+'</div>'+
-    '<div class="stat-card" style="width:560px;flex-shrink:0;">'+recentHeaderHtml+'<div id="mready-recent-list" class="scroll-cue-wrap" style="overflow:auto;">'+listHtml+'</div></div>'+
-    '<div style="text-align:center;color:#6c7590;font-size:13px;margin-top:8px;flex-shrink:0;">Select to see full match scorecard</div>'+
-    '<div style="width:100%;max-width:420px;margin-top:auto;padding-top:20px;flex-shrink:0;">'+
+    '<div class="stat-card mr-compact" style="width:560px;flex-shrink:0;padding:8px 18px 6px;">'+recentHeaderHtml+'<div id="mready-recent-list" class="scroll-cue-wrap" style="overflow:auto;">'+listHtml+'</div></div>'+
+    '<div style="text-align:center;color:#6c7590;font-size:12px;margin-top:4px;flex-shrink:0;">Select to see full match scorecard</div>'+
+    '<div style="width:100%;max-width:420px;margin-top:auto;padding-top:8px;flex-shrink:0;">'+
     '<div style="display:flex;gap:10px;">'+
     '<div class="row action-row'+continueActiveCls+'" style="flex:1;justify-content:center;"><div class="value">Continue</div></div>'+
     '<div class="row back-row'+backActiveCls+'" style="flex:1;justify-content:center;"><div class="value">◀ Back</div></div>'+
@@ -4185,7 +4195,8 @@ function showAwaitFrameStart(){
   document.getElementById("overlay-screen").innerHTML =
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">'+
     '<div class="ov-title" style="color:#4fc3f7;">FRAME '+f.frameNo+'</div>'+
-    '<div class="ov-sub" style="color:#00e676;font-weight:700;margin-bottom:4px;">'+playerName(f.startingPlayer)+' to break</div>'+
+    '<div style="font-size:clamp(44px,11vh,92px);font-weight:900;line-height:1.05;color:#00e676;text-align:center;max-width:92%;word-break:break-word;margin:6px 0 2px;">'+playerName(f.startingPlayer)+'</div>'+
+    '<div style="font-size:clamp(18px,3.4vh,28px);font-weight:700;letter-spacing:6px;color:#8a91ab;margin-bottom:26px;">TO BREAK</div>'+
     '<div class="ov-sub">Press Center to start the frame timer and begin scoring</div>'+
     '<div class="ov-hint" style="margin-top:20px;">Center = Start Frame</div></div>';
   mode="await_frame_start";
@@ -5078,7 +5089,7 @@ function renderNextFrameHandicap(){
 function confirmNextFrameHandicap(){
   var target = matchDecider();
   if(target){ finishMatch(); return; }
-  newFrame(otherPlayerOfLastLoser());
+  newFrame(nextFrameBreaker());
   enterLiveOrAwaitStart();
   saveActiveMatch();
 }
@@ -5097,7 +5108,18 @@ function matchDecider(){
   if(f.framesP1+f.framesP2>=n) return true; /* every frame played, nobody reached a majority — a draw */
   return false;
 }
-function otherPlayerOfLastLoser(){ return endFrameWinner===1?2:1; /* loser breaks next frame */ }
+/* v1.4.31bj BUG FIX: this used to be otherPlayerOfLastLoser() — "loser
+   breaks next frame" — which isn't how break order works in snooker: the
+   break simply alternates every frame regardless of who won. With that old
+   rule, whoever kept losing kept breaking (reported: Reece won the toss,
+   then broke every single frame after). Now flips whoever broke the frame
+   that just ended. Read from match.frame.startingPlayer (fixed for the
+   whole frame, and carried unchanged through a rerack) rather than
+   activePlayer, which moves as the frame is played. */
+function nextFrameBreaker(){
+  var prev=(match.frame && match.frame.startingPlayer) || 1;
+  return otherPlayer(prev);
+}
 
 function matchHandicapSummary(){
   var c=match.config;
