@@ -671,7 +671,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bl";
+var APP_VERSION = "1.4.31bn";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -686,6 +686,12 @@ var APP_VERSION = "1.4.31bl";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bn", date:"2026-09-28", notes:[
+    "Change: Player Stats is now its own page, straight after Playing History, in the same layout. Continue on Playing History goes to it; Continue there carries on to Handicap / Coin Toss, and Back returns to Playing History. The Rewind/Fast-Forward toggle on Playing History is gone."
+  ]},
+  { version:"1.4.31bm", date:"2026-09-28", notes:[
+    "Change: on the Player Stats panel, \"Average Scored\" and \"Maximum Scored\" (whole-match totals, which mostly reflected how long your matches were) are replaced by \"Average per Frame\" and \"Highest Frame Score\". Handicap points are included; matches with no frame detail no longer drag the average down."
+  ]},
   { version:"1.4.31bl", date:"2026-09-28", notes:[
     "Fix: the secret Admin Menu (hold Rewind + Fast-Forward on the first Setup page) stopped opening if you'd gone on to the second Setup page or Playing History and then come back, until the app was relaunched. The same bug also stopped the idle screensaver from starting after that."
   ]},
@@ -3811,51 +3817,99 @@ function focusPlayingHistoryContinue(){ overlayRowIndex = mreadyRecentList.lengt
    new storage needed:
    - Matches Played / Highest Break / Average Break come straight off
      existing per-match and breaks-board records.
-   - Average/Maximum Scored sum each match's own frame-by-frame scoreP1/
-     scoreP2 (already stored on every completed match, same fields the
-     Match Scorecard already displays) — this is genuinely a full career
-     figure from day one, unlike a few other stats this round that could
-     only start counting from the point they were added. */
-var reviewShowingStats=false;
+   - Average per Frame / Highest Frame Score (v1.4.31bm — these replaced
+     "Average Scored"/"Maximum Scored", which summed a whole match's points
+     and so mostly measured match LENGTH, and counted matches with no frame
+     detail as 0) work per FRAME instead, from each match's frame-by-frame
+     scoreP1/scoreP2 (the same fields the Match Scorecard displays). They
+     deliberately include handicap points, since a frame's score starts at
+     its handicap value — that's simply what was scored on the board. Only
+     frames actually on record count: a match saved with no per-frame detail
+     contributes nothing, rather than a 0 that drags the average down. */
+var statsContinueOrBackChoice=0; /* 0=Continue, 1=Back */
 function computePlayerCareerStats(playerName){
   var matches=loadMatches().filter(function(m){ return m.p1===playerName || m.p2===playerName; });
-  var totalScores=matches.map(function(m){
+  var frameScores=[];
+  matches.forEach(function(m){
     var isP1=(m.p1===playerName);
-    return (m.frames||[]).reduce(function(sum,fr){ return sum+(isP1?fr.scoreP1:fr.scoreP2); }, 0);
+    (m.frames||[]).forEach(function(fr){
+      var sc=isP1?fr.scoreP1:fr.scoreP2;
+      if(typeof sc==="number") frameScores.push(sc);
+    });
   });
   var breaks=loadBreaks().filter(function(b){ return b.player===playerName; });
   return {
     matchesPlayed: matches.length,
     highestBreak: breaks.length ? Math.max.apply(null, breaks.map(function(b){ return b.value; })) : 0,
     avgBreak: breaks.length ? (breaks.reduce(function(a,b){ return a+b.value; },0)/breaks.length) : 0,
-    avgScored: totalScores.length ? (totalScores.reduce(function(a,b){ return a+b; },0)/totalScores.length) : 0,
-    maxScored: totalScores.length ? Math.max.apply(null, totalScores) : 0
+    avgFrame: frameScores.length ? (frameScores.reduce(function(a,b){ return a+b; },0)/frameScores.length) : 0,
+    maxFrame: frameScores.length ? Math.max.apply(null, frameScores) : 0
   };
 }
-function renderMatchReviewStats(){
-  var p1=match.config.player1, p2=match.config.player2;
+/* v1.4.31bn: Player Stats is now its OWN page, immediately after Playing
+   History, instead of a Rewind/Fast-Forward toggle on Playing History.
+   Flow: Playing History -> Continue -> Player Stats -> Continue -> Handicap
+   Setup (or Coin Toss / Lag to Break for a Shootout). Back returns one step.
+   Laid out in Playing History's own format: the same names/records header
+   (shared via reviewNamesHeaderHtml() so the two can't drift apart), the
+   same card and row styling, and the same pinned Continue/Back row. As on
+   every other page in this walkthrough it opens with Continue focused and
+   has no Play/Pause shortcut — Back is an explicit button. */
+function reviewNamesHeaderHtml(config){
+  var overallP1=computeOverallRecord(config.player1), overallP2=computeOverallRecord(config.player2);
+  function recordLabel(r){ return r.played>0 ? (r.wins+'W'+(r.draws?'-'+r.draws+'D':'')+'-'+r.losses+'L') : '&mdash;'; }
+  return '<div style="display:flex;align-items:center;justify-content:center;gap:22px;margin-bottom:4px;">'+
+      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player1+'</div>'+
+        '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP1)+'</div></div>'+
+      '<div style="font-size:18px;color:#6c7590;">vs</div>'+
+      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player2+'</div>'+
+        '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP2)+'</div></div>'+
+    '</div>';
+}
+function goPlayerStats(){
+  statsContinueOrBackChoice=0;
+  showOverlay();
+  renderPlayerStats();
+}
+function continueFromPlayerStats(){
+  if(match.config.format==="Shootout"){ tossContinueOrBackChoice=0; tossLagBackFocused=false; renderCoinToss(); }
+  else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); }
+}
+function backFromPlayerStats(){ focusPlayingHistoryContinue(); renderMatchReview(); }
+function renderPlayerStats(){
+  mode="mready_stats";
+  var config=match.config;
+  var p1=config.player1, p2=config.player2;
   var s1=computePlayerCareerStats(p1), s2=computePlayerCareerStats(p2);
   var rows=[
     ["Matches Played", s1.matchesPlayed, s2.matchesPlayed],
     ["Highest Break", s1.highestBreak, s2.highestBreak],
     ["Average Break", s1.avgBreak.toFixed(1), s2.avgBreak.toFixed(1)],
-    ["Average Scored", s1.avgScored.toFixed(1), s2.avgScored.toFixed(1)],
-    ["Maximum Scored", s1.maxScored, s2.maxScored]
+    ["Average per Frame", s1.avgFrame.toFixed(1), s2.avgFrame.toFixed(1)],
+    ["Highest Frame Score", s1.maxFrame, s2.maxFrame]
   ];
-  var rowsHtml=rows.map(function(r){
-    return '<div class="sc-row"><span class="sc-cell" style="flex:2;text-align:left;color:#8a91ab;">'+r[0]+'</span>'+
-      '<span class="sc-cell" style="flex:1;">'+r[1]+'</span>'+
-      '<span class="sc-cell" style="flex:1;">'+r[2]+'</span></div>';
+  var headerRow='<div class="mr-row mr-header"><span style="flex:1.8;"></span><span style="flex:1;text-align:center;">'+p1+'</span><span style="flex:1;text-align:center;">'+p2+'</span></div>';
+  var dataRows=rows.map(function(r){
+    return '<div class="mr-row"><span style="flex:1.8;color:#8a91ab;">'+r[0]+'</span>'+
+      '<span style="flex:1;text-align:center;font-weight:700;color:#b8bfd1;">'+r[1]+'</span>'+
+      '<span style="flex:1;text-align:center;font-weight:700;color:#b8bfd1;">'+r[2]+'</span></div>';
   }).join("");
-  document.getElementById("overlay-screen").innerHTML=
-    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:0 30px;">'+
-    '<div class="ov-title" style="color:#4fc3f7;">PLAYER STATS</div>'+
-    '<div style="font-size:12px;color:#3a4160;margin-bottom:14px;">Career totals, all opponents</div>'+
-    '<div style="width:100%;max-width:480px;">'+
-    '<div class="sc-row sc-header"><span class="sc-cell" style="flex:2;"></span><span class="sc-cell" style="flex:1;">'+p1+'</span><span class="sc-cell" style="flex:1;">'+p2+'</span></div>'+
-    rowsHtml+
+  var cardHeaderHtml='<div style="text-align:center;margin-bottom:2px;"><h2 style="margin-bottom:0;">Career Totals</h2></div>'+
+    '<div class="h2h-line">All matches, any opponent</div>';
+  var continueActiveCls=statsContinueOrBackChoice===0?' active':'';
+  var backActiveCls=statsContinueOrBackChoice===1?' active':'';
+  document.getElementById("overlay-screen").innerHTML =
+    '<div id="player-stats-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:2px;padding-bottom:2px;overflow-y:auto;">'+
+    '<div style="font-size:12px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;">Player Stats</div>'+
+    reviewNamesHeaderHtml(config)+
+    '<div class="stat-card mr-compact" style="width:560px;flex-shrink:0;padding:8px 18px 6px;">'+cardHeaderHtml+headerRow+dataRows+'</div>'+
+    '<div style="width:100%;max-width:420px;margin-top:auto;padding-top:8px;flex-shrink:0;">'+
+    '<div style="display:flex;gap:10px;">'+
+    '<div class="row action-row'+continueActiveCls+'" style="flex:1;justify-content:center;"><div class="value">Continue</div></div>'+
+    '<div class="row back-row'+backActiveCls+'" style="flex:1;justify-content:center;"><div class="value">◀ Back</div></div>'+
     '</div>'+
-    '<div class="ov-hint" style="margin-top:20px;">Rewind/Fast-Forward = Recent Matches</div>'+
+    '<div class="ov-hint" style="margin-top:10px;">&#9664;&#9666; select &middot; Center confirm</div>'+
+    '</div>'+
     '</div>';
 }
 function reviewRowCount(){ return mreadyRecentList.length + reviewExtraRows().length; }
@@ -3915,7 +3969,6 @@ function goMatchReady(){
   var full = buildUnifiedMatchList(config.player1, config.player2);
   mreadyRecentList=[];
   for(var i=full.length-1; i>=Math.max(0,full.length-5); i--){ mreadyRecentList.push({match:full[i], fullIndex:i}); }
-  reviewShowingStats=false;
   showOverlay();
   /* v1.4.31ao BUG FIX: this used to assume Continue was always the LAST
      row (true before the explicit Back row was added after it, per the
@@ -3929,7 +3982,6 @@ function goMatchReady(){
 }
 function renderMatchReview(){
   mode="mready_review";
-  if(reviewShowingStats){ renderMatchReviewStats(); return; }
   var config=match.config;
   var listHtml;
   var headerRow='<div class="mr-row mr-header"><span class="mr-date">Date</span><span class="mr-score">Score</span><span class="mr-breaks">Highest Break</span><span class="chev"></span></div>';
@@ -3957,7 +4009,6 @@ function renderMatchReview(){
   var paddingRows = new Array(emptyRowsNeeded).fill(emptyRowHtml).join("");
   listHtml = headerRow + dataRows + paddingRows;
   var h2h = computeHeadToHead(config.player1, config.player2);
-  var overallP1 = computeOverallRecord(config.player1), overallP2 = computeOverallRecord(config.player2);
   var h2hText = h2h.matches>0 ? ('Head-to-Head ('+h2h.matches+'): Wins '+h2h.p1Wins+'-'+h2h.p2Wins+(h2h.draws?' &middot; Draws '+h2h.draws:'')+'  &middot;  Frames: '+h2h.p1FramePct+'% - '+h2h.p2FramePct+'%') : '';
   /* v1.4.31e: head-to-head now sits centered on its own line under the
      title, rather than pushed out to the right edge — nothing on this
@@ -3965,15 +4016,7 @@ function renderMatchReview(){
      center it. */
   var recentHeaderHtml = '<div style="text-align:center;margin-bottom:2px;"><h2 style="margin-bottom:0;">Recent Matches</h2></div>'+
     (h2hText?'<div class="h2h-line">'+h2hText+'</div>':'');
-  function recordLabel(r){ return r.played>0 ? (r.wins+'W'+(r.draws?'-'+r.draws+'D':'')+'-'+r.losses+'L') : '&mdash;'; }
-  var namesHeaderHtml =
-    '<div style="display:flex;align-items:center;justify-content:center;gap:22px;margin-bottom:4px;">'+
-      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player1+'</div>'+
-        '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP1)+'</div></div>'+
-      '<div style="font-size:18px;color:#6c7590;">vs</div>'+
-      '<div style="text-align:center;"><div style="font-size:26px;font-weight:700;color:#e8ecf4;">'+config.player2+'</div>'+
-        '<div style="font-size:12px;color:#8a91ab;margin-top:2px;">Record: '+recordLabel(overallP2)+'</div></div>'+
-    '</div>';
+  var namesHeaderHtml = reviewNamesHeaderHtml(config);
   var isShootoutMatch = config.format==="Shootout";
   var extras = reviewExtraRows();
   var baseIdx = mreadyRecentList.length;
@@ -3990,7 +4033,7 @@ function renderMatchReview(){
      feedback, since they're laid out side by side) — Left/Right switches
      which of the two is selected within it, matching the visual layout
      instead of treating them as two separate Up/Down stops. */
-  var reviewHint = (onContinueOrBackRow ? '&#9664;&#9666; select &middot; Center confirm' : '&#9650;&#9660; move &middot; Center select') + ' &middot; Rewind/Fast-Forward = Player Stats';
+  var reviewHint = (onContinueOrBackRow ? '&#9664;&#9666; select &middot; Center confirm' : '&#9650;&#9660; move &middot; Center select');
   document.getElementById("overlay-screen").innerHTML =
     '<div id="match-review-page" style="display:flex;flex-direction:column;align-items:center;height:100%;padding-top:2px;padding-bottom:2px;overflow-y:auto;">'+
     '<div style="font-size:12px;font-weight:600;color:#6c7590;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;">Playing History</div>'+
@@ -7303,10 +7346,6 @@ function onKeyTap(code){
     return;
   }
   if(mode==="mready_review"){
-    /* v1.4.31be: Center does nothing while the Player Stats panel (REW/FF
-       toggle) is showing — it's a static side-by-side comparison, nothing
-       on it to select. */
-    if(reviewShowingStats) return;
     /* v1.4.31e: Play/Pause-as-back removed here — an explicit Back row now
        does this instead (see reviewExtraRows()), per the new design
        language of not relying on a hardware shortcut for back navigation.
@@ -7318,16 +7357,21 @@ function onKeyTap(code){
       var extras=reviewExtraRows(), baseIdx=mreadyRecentList.length, pos=overlayRowIndex-baseIdx;
       if(pos>=0 && pos<extras.length){
         if(extras[pos]==="continueOrBack"){
-          if(reviewContinueOrBackChoice===0){
-            if(match.config.format==="Shootout"){ tossContinueOrBackChoice=0; tossLagBackFocused=false; renderCoinToss(); }
-            else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); }
-          } else { returnToSetup2(); }
+          if(reviewContinueOrBackChoice===0){ goPlayerStats(); }
+          else { returnToSetup2(); }
         }
       } else {
         var entry=mreadyRecentList[overlayRowIndex];
         openMatchScorecard(entry.match.p1, entry.match.p2, entry.fullIndex, function(){ renderMatchReview(); });
       }
     }
+    return;
+  }
+  if(mode==="mready_stats"){
+    /* v1.4.31bn: the new Player Stats page — Center on Continue moves on,
+       on Back returns to Playing History. Play/Pause deliberately does
+       nothing, matching every other page in this walkthrough. */
+    if(code===13){ if(statsContinueOrBackChoice===0) continueFromPlayerStats(); else backFromPlayerStats(); }
     return;
   }
   if(mode==="handicap_setup"){
@@ -7341,8 +7385,7 @@ function onKeyTap(code){
           /* Row counts differ between the two pages — reuse the shared
              helper rather than recalculating (and risking going stale
              again the way this did once already — see its own comment). */
-          focusPlayingHistoryContinue();
-          renderMatchReview();
+          goPlayerStats(); /* v1.4.31bn: Player Stats now sits directly before this page */
         }
       }
     }
@@ -7355,7 +7398,7 @@ function onKeyTap(code){
        Coin and Back, Center confirms whichever is selected. */
     if(code===13){
       if(tossContinueOrBackChoice===0){ startCoinSpin("mready_pick"); }
-      else if(match.config.handicapType==="None"){ focusPlayingHistoryContinue(); renderMatchReview(); }
+      else if(match.config.handicapType==="None"){ goPlayerStats(); }
       else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); }
     }
     else if(code===37||code===39){ tossContinueOrBackChoice = tossContinueOrBackChoice===0?1:0; renderCoinToss(); }
@@ -7373,7 +7416,7 @@ function onKeyTap(code){
     else if(code===40){ tossLagBackFocused=true; renderCoinToss(); }
     else if(code===38){ tossLagBackFocused=false; renderCoinToss(); }
     else if(code===13 && tossLagBackFocused){
-      if(match.config.handicapType==="None"){ focusPlayingHistoryContinue(); renderMatchReview(); }
+      if(match.config.handicapType==="None"){ goPlayerStats(); }
       else { overlayRowIndex=handicapSetupRows().length-1; handicapContinueOrBackChoice=0; renderHandicapSetup(); }
     }
     return;
@@ -7726,14 +7769,11 @@ function handleNavKeydown(code, kbOpen){
     if(!frameCompleteWillFinishMatch && (code===38||code===40)){ frameCompleteRow=frameCompleteRow===0?1:0; renderFrameCompleteConfirm(); }
     return;
   }
+  if(mode==="mready_stats"){
+    if(code===37||code===39){ statsContinueOrBackChoice = statsContinueOrBackChoice===0?1:0; renderPlayerStats(); }
+    return;
+  }
   if(mode==="mready_review"){
-    /* v1.4.31be: REW/FF toggles the Player Stats panel on and off — same
-       "browse an alternate view" convention as REW/FF on Setup1's Top 10
-       Breaks card, just a two-way toggle here rather than a multi-way
-       cycle, since there's only the recent-matches list and this one
-       other view. */
-    if(code===227||code===228){ reviewShowingStats=!reviewShowingStats; renderMatchReview(); return; }
-    if(reviewShowingStats) return; /* nothing else to navigate while showing it */
     var totalRows=reviewRowCount();
     if(code===38) overlayMoveIndex(-1,totalRows,renderMatchReview);
     else if(code===40) overlayMoveIndex(1,totalRows,renderMatchReview);
