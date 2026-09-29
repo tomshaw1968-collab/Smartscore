@@ -671,7 +671,7 @@
    whatever code/test-document version accompanies each change (including
    letter suffixes, e.g. "1.4.29b"), so the tag can always be checked
    directly against whichever test document is in use. */
-var APP_VERSION = "1.4.31bn";
+var APP_VERSION = "1.4.31bo";
 /* Shared data-schema version for match/break/roster records, wherever they
    live — this device's own localStorage AND exported backup files use the
    exact same record shapes, so one version number covers both. Bump this
@@ -686,6 +686,9 @@ var APP_VERSION = "1.4.31bn";
    requiring anyone to manually export/reimport just to update the app. */
 var BACKUP_FORMAT_VERSION = 1;
 var CHANGELOG = [
+  { version:"1.4.31bo", date:"2026-09-29", notes:[
+    "New: Match Scorecard has an Avg Break column, per frame, with the whole-match average in the Total row. Only works for matches played from now on \u2014 older matches show \u2014 in that column, since the data needed didn't exist before."
+  ]},
   { version:"1.4.31bn", date:"2026-09-28", notes:[
     "Change: Player Stats is now its own page, straight after Playing History, in the same layout. Continue on Playing History goes to it; Continue there carries on to Handicap / Coin Toss, and Back returns to Playing History. The Rewind/Fast-Forward toggle on Playing History is gone."
   ]},
@@ -2142,6 +2145,29 @@ function setLastBackupAt(iso){ try{ localStorage.setItem("snooker_last_backup_at
 function loadMatches(){ try{ var raw=localStorage.getItem("snooker_matches"); return raw?JSON.parse(raw):[]; }catch(e){ return []; } }
 function saveMatches(m){ try{ localStorage.setItem("snooker_matches", JSON.stringify(m)); }catch(e){} markDataDirty(); }
 function loadBreaks(){ try{ var raw=localStorage.getItem("snooker_breaks"); return raw?JSON.parse(raw):[]; }catch(e){ return []; } }
+/* v1.4.31bo: per-frame Average Break for the Match Scorecard. The breaks
+   board (loadBreaks()) has never recorded which match or frame a break
+   belongs to — only player/opponent/value/date — so a frame's breaks are
+   identified here by a timestamp window (this frame's frameStartTime
+   onward) plus matching this match's exact player pairing, rather than
+   any stored link. This is robust to Undo: an undone break is actually
+   removed from the breaks board (see removeBreakById(), used by
+   undoLast()), so a frame-end computed after an undo naturally reflects
+   the corrected picture with no special-casing needed here. Only works
+   going forward from when this field was added — a frame with no
+   frameStartTime (shouldn't occur post-repairFrameShape(), but defended
+   anyway) simply credits nothing rather than guessing. */
+function computeFrameBreakStats(frameStartTime){
+  var stats={1:{sum:0,count:0}, 2:{sum:0,count:0}};
+  if(!frameStartTime) return stats;
+  var p1=match.config.player1, p2=match.config.player2;
+  loadBreaks().forEach(function(b){
+    if(b.date < frameStartTime) return;
+    if(b.player===p1 && b.opponent===p2) { stats[1].sum+=b.value; stats[1].count+=1; }
+    else if(b.player===p2 && b.opponent===p1) { stats[2].sum+=b.value; stats[2].count+=1; }
+  });
+  return stats;
+}
 window.recordMatchResult=function(p1,p2,score1,score2,extra){ extra=extra||{}; var m=loadMatches(); m.push({p1:p1,p2:p2,score1:score1,score2:score2,date:new Date().toISOString(),highestBreakP1:extra.highestBreakP1||0,highestBreakP2:extra.highestBreakP2||0,handicap:extra.handicap||"None",frames:extra.frames||[],matchDurationMs:extra.matchDurationMs||0,wasAbandoned:!!extra.wasAbandoned,isDraw:!!extra.isDraw,decidedOnBlue:!!extra.decidedOnBlue}); try{localStorage.setItem("snooker_matches",JSON.stringify(m));}catch(e){} markDataDirty(); };
 window.recordBreak=function(player,value,opponent,isShootout){
   if(!value||value<=0) return null;
@@ -2265,12 +2291,15 @@ function renderMatchScorecard(){
   var m=scorecardList[scorecardIndex];
   var rows=(m.frames||[]).map(function(fr){
     var col=fr.winner===1?'#00e676':(fr.winner===2?'#00e676':'#b8bfd1');
+    var avgP1 = fr.breakCountP1>0 ? (fr.breakSumP1/fr.breakCountP1).toFixed(1) : '\u2014';
+    var avgP2 = fr.breakCountP2>0 ? (fr.breakSumP2/fr.breakCountP2).toFixed(1) : '\u2014';
     return '<div class="sc-row">'+
       '<span class="sc-cell sc-frameno">F'+fr.frameNo+'</span>'+
       '<span class="sc-cell sc-score" style="color:'+col+';">'+fr.scoreP1+' - '+fr.scoreP2+'</span>'+
       '<span class="sc-cell sc-hcap">'+hcapCellP1(fr.handicapValue)+'</span>'+
       '<span class="sc-cell sc-hcap">'+hcapCellP2(fr.handicapValue)+'</span>'+
       '<span class="sc-cell sc-break">'+fr.highestBreakP1+' / '+fr.highestBreakP2+'</span>'+
+      '<span class="sc-cell sc-break">'+avgP1+' / '+avgP2+'</span>'+
       '<span class="sc-cell sc-time">'+formatElapsed(fr.frameTimeMs||0)+'</span>'+
     '</div>';
   }).join("");
@@ -2284,15 +2313,28 @@ function renderMatchScorecard(){
     statusBadge += ' <span style="font-size:13px;font-weight:700;letter-spacing:1px;color:#ffa726;vertical-align:middle;">&middot; EDITED (was '+m.originalScore1+'-'+m.originalScore2+')</span>';
   }
   var totalLabel = m.incomplete ? 'So Far' : 'Total';
+  /* v1.4.31bo: match-wide Average Break — summed across every frame's own
+     sum/count first, divided once, NOT an average of the per-frame
+     averages (which would let a frame with one lucky break count as much
+     as a frame with ten routine ones). Frames saved before this field
+     existed simply contribute 0/0, same as an old match with no frame
+     detail at all — shows as "—", not a fabricated number. */
+  var matchSumP1=0, matchCountP1=0, matchSumP2=0, matchCountP2=0;
+  (m.frames||[]).forEach(function(fr){
+    matchSumP1+=(fr.breakSumP1||0); matchCountP1+=(fr.breakCountP1||0);
+    matchSumP2+=(fr.breakSumP2||0); matchCountP2+=(fr.breakCountP2||0);
+  });
+  var matchAvgP1 = matchCountP1>0 ? (matchSumP1/matchCountP1).toFixed(1) : '\u2014';
+  var matchAvgP2 = matchCountP2>0 ? (matchSumP2/matchCountP2).toFixed(1) : '\u2014';
   document.getElementById("overlay-screen").innerHTML =
     '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:0 30px;">'+
     '<div class="ov-title" style="color:#4fc3f7;">MATCH SCORECARD'+statusBadge+'</div>'+
     '<div class="ov-sub" style="margin-bottom:4px;">'+m.p1+'  '+m.score1+' - '+m.score2+'  '+m.p2+'</div>'+
     '<div style="font-size:12px;color:#3a4160;margin-bottom:14px;">'+formatDateWithYear(m.date)+(m.handicap&&m.handicap!=="None"?' &middot; Started '+m.handicap:'')+'</div>'+
-    '<div id="scorecard-rows" class="scroll-cue-wrap" style="width:100%;max-width:640px;max-height:280px;overflow:auto;">'+
-      '<div class="sc-row sc-header"><span class="sc-cell sc-frameno">Frame</span><span class="sc-cell sc-score">Score</span><span class="sc-cell sc-hcap">H\'cap '+m.p1+'</span><span class="sc-cell sc-hcap">H\'cap '+m.p2+'</span><span class="sc-cell sc-break">High Breaks</span><span class="sc-cell sc-time">Time</span></div>'+
+    '<div id="scorecard-rows" class="scroll-cue-wrap" style="width:100%;max-width:720px;max-height:280px;overflow:auto;">'+
+      '<div class="sc-row sc-header"><span class="sc-cell sc-frameno">Frame</span><span class="sc-cell sc-score">Score</span><span class="sc-cell sc-hcap">H\'cap '+m.p1+'</span><span class="sc-cell sc-hcap">H\'cap '+m.p2+'</span><span class="sc-cell sc-break">High Breaks</span><span class="sc-cell sc-break">Avg Break</span><span class="sc-cell sc-time">Time</span></div>'+
       rows+
-      '<div class="sc-row sc-total"><span class="sc-cell sc-frameno">'+totalLabel+'</span><span class="sc-cell sc-score">'+m.score1+' - '+m.score2+'</span><span class="sc-cell sc-hcap">&mdash;</span><span class="sc-cell sc-hcap">&mdash;</span><span class="sc-cell sc-break">'+(m.highestBreakP1||0)+' / '+(m.highestBreakP2||0)+'</span><span class="sc-cell sc-time">'+formatElapsed(m.matchDurationMs||0)+'</span></div>'+
+      '<div class="sc-row sc-total"><span class="sc-cell sc-frameno">'+totalLabel+'</span><span class="sc-cell sc-score">'+m.score1+' - '+m.score2+'</span><span class="sc-cell sc-hcap">&mdash;</span><span class="sc-cell sc-hcap">&mdash;</span><span class="sc-cell sc-break">'+(m.highestBreakP1||0)+' / '+(m.highestBreakP2||0)+'</span><span class="sc-cell sc-break">'+matchAvgP1+' / '+matchAvgP2+'</span><span class="sc-cell sc-time">'+formatElapsed(m.matchDurationMs||0)+'</span></div>'+
     '</div>'+
     '<div class="ov-hint" style="margin-top:16px;">Center = Close &middot; &uarr;&darr; = Scroll'+navHint+'</div>'+
     '</div>';
@@ -4341,7 +4383,13 @@ function newFrame(startingPlayer, forcedFrameNo){
     frameNo: (forcedFrameNo!=null) ? forcedFrameNo : (match.frame?match.frame.frameNo+1:1),
     rackOrder: buildInitialRackOrder(),
     frameElapsedMs:0, frameRunningSince:null, awaitingFrameStart:true,
-    highestBreakP1:0, highestBreakP2:0
+    highestBreakP1:0, highestBreakP2:0,
+    /* v1.4.31bo: marks the moment this frame's breaks start counting, for
+       the Match Scorecard's per-frame/match Average Break column — see
+       computeFrameBreakStats() below. Reset on every fresh frame AND every
+       rerack (reRackFrame() calls newFrame() too), which is correct: a
+       rerack's breaks genuinely belong to a new attempt at the frame. */
+    frameStartTime: new Date().toISOString()
   };
   match.undoStack=[];
   breakRecordStack=[];
@@ -4537,6 +4585,12 @@ function repairFrameShape(f){
   if(f.shotClockRemainingSec===undefined) f.shotClockRemainingSec=SHOOTOUT_SHOT_CLOCK_LONG_SEC;
   if(f.shotClockPaused===undefined) f.shotClockPaused=false;
   if(f.shootoutTimeLimitReached===undefined) f.shootoutTimeLimitReached=false;
+  /* v1.4.31bo: a paused match saved before this feature won't have this —
+     defaulting to "now" means no break made since resuming gets wrongly
+     excluded, and (just as important) no break from BEFORE this point
+     gets wrongly included, since resuming is exactly when we lose any
+     real record of when this particular frame actually began. */
+  if(f.frameStartTime===undefined) f.frameStartTime=new Date().toISOString();
 }
 function markColourPottedOn(f,colour){ for(var i=0;i<f.rackOrder.length;i++){ if(f.rackOrder[i].type===colour && !f.rackOrder[i].free){ f.rackOrder[i].potted=true; return; } } }
 
@@ -5205,7 +5259,8 @@ function confirmEndFrame(){
   var f=match.frame;
   endCurrentBreak();
   if(f.frameRunningSince!==null){ f.frameElapsedMs += (Date.now()-f.frameRunningSince); f.frameRunningSince=null; }
-  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:endFrameWinner, handicapValue:f.startHandicapValue });
+  var bstats1=computeFrameBreakStats(f.frameStartTime);
+  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:endFrameWinner, handicapValue:f.startHandicapValue, breakSumP1:bstats1[1].sum, breakCountP1:bstats1[1].count, breakSumP2:bstats1[2].sum, breakCountP2:bstats1[2].count });
   if(endFrameWinner===1) f.framesP1+=1; else f.framesP2+=1;
   if(match.config.handicapType==="Variable"){
     match.config.handicapValue += (endFrameWinner===1? -1:1) * match.config.handicapStep;
@@ -5979,7 +6034,8 @@ function confirmBlueBallWinner(){
   var winner=blueBall.pendingWinner;
   endFrameWinner=winner;
   if(f.frameRunningSince!==null){ f.frameElapsedMs += (Date.now()-f.frameRunningSince); f.frameRunningSince=null; }
-  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:winner, handicapValue:f.startHandicapValue });
+  var bstats2=computeFrameBreakStats(f.frameStartTime);
+  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:winner, handicapValue:f.startHandicapValue, breakSumP1:bstats2[1].sum, breakCountP1:bstats2[1].count, breakSumP2:bstats2[2].sum, breakCountP2:bstats2[2].count });
   if(winner===1) f.framesP1+=1; else f.framesP2+=1;
   match.decidedOnBlue=true;
   blueBall=null;
@@ -6721,7 +6777,8 @@ function endFrameAuto(){
   endFrameWinner=winner;
   endCurrentBreak();
   if(f.frameRunningSince!==null){ f.frameElapsedMs += (Date.now()-f.frameRunningSince); f.frameRunningSince=null; }
-  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:winner, handicapValue:f.startHandicapValue });
+  var bstats3=computeFrameBreakStats(f.frameStartTime);
+  match.frameHistory.push({ frameNo:f.frameNo, scoreP1:f.scoreP1, scoreP2:f.scoreP2, highestBreakP1:f.highestBreakP1, highestBreakP2:f.highestBreakP2, frameTimeMs:f.frameElapsedMs, winner:winner, handicapValue:f.startHandicapValue, breakSumP1:bstats3[1].sum, breakCountP1:bstats3[1].count, breakSumP2:bstats3[2].sum, breakCountP2:bstats3[2].count });
   f.framesP1 += winner===1?1:0; f.framesP2 += winner===2?1:0;
   if(match.config.handicapType==="Variable"){
     match.config.handicapValue += (winner===1? -1:1) * match.config.handicapStep;
